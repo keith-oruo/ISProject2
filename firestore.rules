@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function validTransaction() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['amountCents', 'category', 'date', 'note'])
+        && data.keys().hasOnly(['amountCents', 'category', 'date', 'note'])
+        && data.amountCents is int && data.amountCents > 0
+        && data.category in ['Food', 'Transport', 'Rent', 'Shopping', 'Bills', 'Other']
+        && data.date is int && data.date > 0
+        && data.note is string && data.note.size() <= 500;
+    }
+
+    function validGoal() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['title', 'targetCents', 'savedCents', 'dueDate'])
+        && data.keys().hasOnly(['title', 'targetCents', 'savedCents', 'dueDate'])
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 100
+        && data.targetCents is int && data.targetCents > 0
+        && data.savedCents is int && data.savedCents >= 0
+        && data.dueDate is int && data.dueDate > 0;
+    }
+
+    match /users/{userId}/transactions/{transactionId} {
+      allow read, delete: if isOwner(userId);
+      allow create, update: if isOwner(userId) && validTransaction();
+    }
+
+    match /users/{userId}/goals/{goalId} {
+      allow read, delete: if isOwner(userId);
+      allow create, update: if isOwner(userId) && validGoal();
+    }
+  }
+}
