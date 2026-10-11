@@ -1,13 +1,13 @@
 <resources>
-    <color name="pine">#125947</color>
-    <color name="ink">#18302B</color>
-    <color name="canvas">#F4F7F2</color>
+    <color name="pine">#18B7B0</color>
+    <color name="ink">#142D66</color>
+    <color name="canvas">#F1F5FC</color>
     <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="colorPrimary">@color/pine</item>
         <item name="colorAccent">@color/pine</item>
         <item name="android:fontFamily">sans</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:statusBarColor">@color/canvas</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/ink</item>
         <item name="android:windowBackground">@color/canvas</item>
     </style>
 </resources>

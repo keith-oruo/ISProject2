@@ -3,39 +3,41 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="@android:color/white">
+    android:background="@color/canvas">
     <TextView
         android:id="@+id/pageTitle"
         android:layout_width="match_parent"
-        android:layout_height="56dp"
-        android:gravity="center"
-        android:background="#EAEDEC"
+        android:layout_height="60dp"
+        android:gravity="center_vertical"
+        android:paddingStart="20dp"
+        android:background="@color/ink"
         android:text="Dashboard"
-        android:textColor="@color/ink"
-        android:textSize="19sp"
+        android:textColor="@android:color/white"
+        android:textSize="20sp"
         android:textStyle="bold" />
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
+        android:background="@color/canvas"
         android:fillViewport="true">
         <LinearLayout
             android:id="@+id/content"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="20dp" />
+            android:padding="18dp" />
     </ScrollView>
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="56dp"
+        android:layout_height="64dp"
         android:gravity="center_vertical"
-        android:background="#EAEDEC"
+        android:background="#102452"
         android:orientation="horizontal">
-        <Button android:id="@+id/homeTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:text="Home" android:textAllCaps="false" />
-        <Button android:id="@+id/transactionsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:text="Txns" android:textAllCaps="false" />
-        <Button android:id="@+id/chatTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:text="Chat" android:textAllCaps="false" />
-        <Button android:id="@+id/goalsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:text="Goals" android:textAllCaps="false" />
-        <Button android:id="@+id/profileTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:text="Profile" android:textAllCaps="false" />
+        <Button android:id="@+id/homeTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Home" android:textColor="@android:color/white" android:textAllCaps="false" android:textSize="11sp" />
+        <Button android:id="@+id/transactionsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Activity" android:textColor="@android:color/white" android:textAllCaps="false" android:textSize="11sp" />
+        <Button android:id="@+id/chatTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Chat" android:textColor="@android:color/white" android:textAllCaps="false" android:textSize="11sp" />
+        <Button android:id="@+id/goalsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Goals" android:textColor="@android:color/white" android:textAllCaps="false" android:textSize="11sp" />
+        <Button android:id="@+id/profileTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Profile" android:textColor="@android:color/white" android:textAllCaps="false" android:textSize="11sp" />
     </LinearLayout>
 </LinearLayout>

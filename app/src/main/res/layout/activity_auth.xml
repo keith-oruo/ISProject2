@@ -3,21 +3,43 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true"
-    android:background="@android:color/white">
+    android:background="@color/canvas">
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
         android:padding="20dp">
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="180dp"
+            android:gravity="center_vertical"
+            android:orientation="vertical"
+            android:padding="22dp"
+            android:background="@drawable/auth_hero">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="PesaPath"
+                android:textColor="@android:color/white"
+                android:textSize="28sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Your money. Your next move."
+                android:textColor="#DCEBFF"
+                android:textSize="16sp" />
+        </LinearLayout>
         <TextView
             android:id="@+id/authHeading"
             android:layout_width="match_parent"
-            android:layout_height="56dp"
-            android:background="#EAEDEC"
-            android:gravity="center"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:gravity="start"
             android:text="Log In"
             android:textColor="@color/ink"
-            android:textSize="19sp"
+            android:textSize="24sp"
             android:textStyle="bold" />
         <TextView
             android:layout_width="match_parent"
@@ -31,40 +53,53 @@
         <EditText
             android:id="@+id/email"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="36dp"
+            android:layout_height="56dp"
+            android:layout_marginTop="24dp"
+            android:background="@drawable/auth_field"
             android:hint="Email"
             android:inputType="textEmailAddress"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
             android:singleLine="true" />
         <EditText
             android:id="@+id/password"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
+            android:layout_height="56dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/auth_field"
             android:hint="Password"
             android:inputType="textPassword"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
             android:singleLine="true" />
         <Button
             android:id="@+id/submit"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="26dp"
-            android:text="LOGIN" />
+            android:layout_height="56dp"
+            android:layout_marginTop="20dp"
+            android:background="@drawable/auth_submit"
+            android:text="LOGIN"
+            android:textAllCaps="false"
+            android:textColor="@android:color/white"
+            android:textSize="16sp"
+            android:textStyle="bold" />
         <Button
             android:id="@+id/switchMode"
             style="?attr/borderlessButtonStyle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="40dp"
+            android:layout_marginTop="18dp"
             android:text="Don't have an account? Register"
-            android:textAllCaps="false" />
+            android:textAllCaps="false"
+            android:textColor="#087F91" />
         <Button
             android:id="@+id/resetPassword"
             style="?attr/borderlessButtonStyle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Forgot password?"
-            android:textAllCaps="false" />
+            android:textAllCaps="false"
+            android:textColor="#60708D" />
         <TextView
             android:id="@+id/authError"
             android:layout_width="match_parent"
