@@ -8,11 +8,13 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
@@ -24,12 +26,16 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.CollectionReference
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.QueryDocumentSnapshot
 import java.math.BigDecimal
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
+import kotlinx.coroutines.runBlocking
 
 class HomeActivity : AppCompatActivity() {
     private val categories = listOf("Food", "Transport", "Rent", "Shopping", "Bills", "Other")
@@ -42,10 +48,24 @@ class HomeActivity : AppCompatActivity() {
     }
     private lateinit var transactionStore: CollectionReference
     private lateinit var goalStore: CollectionReference
+    private lateinit var chatStore: CollectionReference
     private lateinit var content: LinearLayout
     private lateinit var heading: TextView
+    private lateinit var chatComposer: LinearLayout
+    private lateinit var chatInput: EditText
+    private lateinit var chatSendButton: Button
+    private val chatDocuments = mutableListOf<QueryDocumentSnapshot>()
     private var transactionListener: ListenerRegistration? = null
     private var goalListener: ListenerRegistration? = null
+    private var chatListener: ListenerRegistration? = null
+    private var chatMessagesContainer: LinearLayout? = null
+    private var chatStatusView: TextView? = null
+    private var chatService: FinancialChatService? = null
+    private var chatHistoryLoaded = false
+    private var chatLoadError: String? = null
+    private var chatSetupError: String? = null
+    private var chatSending = false
+    private val chatExecutor = Executors.newSingleThreadExecutor()
     private var page = "Home"
     private var errorMessage: String? = null
 
@@ -69,6 +89,10 @@ class HomeActivity : AppCompatActivity() {
         val userStore = FirebaseFirestore.getInstance().collection("users").document(user.uid)
         transactionStore = userStore.collection("transactions")
         goalStore = userStore.collection("goals")
+        chatStore = userStore.collection("chatMessages")
+        chatComposer = findViewById(R.id.chatComposer)
+        chatInput = findViewById(R.id.chatInput)
+        chatSendButton = findViewById(R.id.chatSend)
 
         listOf(R.id.homeTab to "Home", R.id.transactionsTab to "Transactions",
             R.id.chatTab to "Chat", R.id.goalsTab to "Goals", R.id.profileTab to "Profile")
@@ -93,17 +117,72 @@ class HomeActivity : AppCompatActivity() {
             }
             if (page == "Goals") show(page)
         }
+        loadChatHistory()
         show("Home")
     }
 
     override fun onDestroy() {
         transactionListener?.remove()
         goalListener?.remove()
+        chatListener?.remove()
+        chatExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun loadChatHistory() {
+        chatListener?.remove()
+        chatHistoryLoaded = false
+        chatLoadError = null
+        updateChatControls()
+        chatListener = chatStore.orderBy("createdAt", Query.Direction.ASCENDING).limitToLast(60)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    val permissionDenied = error is com.google.firebase.firestore.FirebaseFirestoreException &&
+                        error.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED
+                    chatLoadError = if (permissionDenied) {
+                        "Firestore rules are blocking chat history. Publish firestore.rules in Firebase Console, then tap here to retry."
+                    } else {
+                        "Could not load saved chat: ${error.localizedMessage}"
+                    }
+                    if (page == "Chat") {
+                        renderChatMessages()
+                        setChatStatus(chatLoadError.orEmpty())
+                    }
+                    updateChatControls()
+                    return@addSnapshotListener
+                }
+                if (snapshot == null) return@addSnapshotListener
+                chatDocuments.clear()
+                chatDocuments.addAll(snapshot.documents.filterIsInstance<QueryDocumentSnapshot>())
+                chatHistoryLoaded = true
+                chatLoadError = null
+                if (chatService == null) {
+                    try {
+                        chatService = FinancialChatService().apply {
+                            restore(chatDocuments.mapNotNull { record ->
+                                val sender = record.getString("sender") ?: return@mapNotNull null
+                                val text = record.getString("text") ?: return@mapNotNull null
+                                PersistedChatTurn(sender, text)
+                            })
+                        }
+                    } catch (setupError: Exception) {
+                        chatSetupError = "Gemini setup failed: ${setupError.localizedMessage ?: "Check Firebase AI Logic setup."}"
+                    }
+                }
+                if (page == "Chat") {
+                    renderChatMessages()
+                    setChatStatus(when {
+                        chatSending -> "PesaPath is thinking…"
+                        else -> chatSetupError.orEmpty()
+                    })
+                    updateChatControls()
+                }
+            }
     }
 
     private fun show(destination: String) {
         page = destination
+        chatComposer.visibility = if (destination == "Chat") View.VISIBLE else View.GONE
         content.removeAllViews()
         heading.text = when (destination) {
             "Home" -> "Dashboard"
@@ -404,23 +483,202 @@ class HomeActivity : AppCompatActivity() {
 
     private fun assistant() {
         pageBanner("PESAPATH CHAT", "A clearer money conversation", "Your financial assistant")
-        val intro = panel().apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(22.dp, 26.dp, 22.dp, 26.dp)
+        val privacyNote = panel()
+        addText(privacyNote, "Your AI assistant", 15f, true, 0xFF142D66.toInt())
+        addText(privacyNote,
+            "Monthly spending totals and savings goals are shared with Gemini to answer your questions. Don't enter passwords, PINs, or account numbers.",
+            12f, false, 0xFF60708D.toInt(), top = 5.dp)
+        content.addView(privacyNote, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp })
+
+        chatMessagesContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(chatMessagesContainer, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp })
+        chatStatusView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(0xFF60708D.toInt())
+            visibility = View.GONE
         }
-        val mark = TextView(this).apply {
-            text = "P"
-            textSize = 28f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                intArrayOf(0xFF174A9A.toInt(), 0xFF18B7B0.toInt())).apply { shape = GradientDrawable.OVAL }
+        content.addView(chatStatusView)
+        chatSendButton.setOnClickListener { sendChatMessage() }
+        chatInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                sendChatMessage()
+                true
+            } else false
         }
-        intro.addView(mark, LinearLayout.LayoutParams(64.dp, 64.dp).apply { bottomMargin = 16.dp })
-        addText(intro, "Your assistant is getting ready", 18f, true, 0xFF142D66.toInt())
-        addText(intro, "Chat will be available in a future update.", 14f, false, 0xFF60708D.toInt(), top = 8.dp)
-        content.addView(intro, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 14.dp })
+        renderChatMessages()
+        chatLoadError?.let { setChatStatus(it) }
+        chatSetupError?.let { setChatStatus(it) }
+        if (chatSending) setChatStatus("PesaPath is thinking…")
+        updateChatControls()
+    }
+
+    private fun renderChatMessages() {
+        val container = chatMessagesContainer ?: return
+        container.removeAllViews()
+        if (chatDocuments.isEmpty()) {
+            if (!chatHistoryLoaded) {
+                addText(container, chatLoadError ?: "Loading your conversation…", 14f, false, 0xFF60708D.toInt())
+            } else {
+                val welcome = panel()
+                addText(welcome, "Hi, I'm your PesaPath AI assistant.", 16f, true, 0xFF142D66.toInt())
+                addText(welcome, "Ask about your spending or savings goals.", 13f, false, 0xFF60708D.toInt(), top = 4.dp)
+                container.addView(welcome, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 10.dp })
+                listOf("How much have I spent this month?", "Where is most of my spending going?", "Help me plan a savings goal")
+                    .forEach { suggestion ->
+                        val prompt = TextView(this).apply {
+                            text = suggestion
+                            textSize = 13f
+                            setTextColor(0xFF174A9A.toInt())
+                            setPadding(14.dp, 11.dp, 14.dp, 11.dp)
+                            background = GradientDrawable().apply {
+                                setColor(0xFFE5EEFC.toInt())
+                                cornerRadius = 14.dp.toFloat()
+                            }
+                            isClickable = true
+                            isFocusable = true
+                            setOnClickListener {
+                                chatInput.setText(suggestion)
+                                sendChatMessage()
+                            }
+                        }
+                        container.addView(prompt, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8.dp })
+                    }
+            }
+        }
+        chatDocuments.forEach { record ->
+            val sender = record.getString("sender") ?: "assistant"
+            val message = record.getString("text").orEmpty()
+            if (message.isNotBlank()) addChatBubble(container, sender, message)
+        }
+        if (chatSending) setChatStatus("PesaPath is thinking…")
+        findViewById<ScrollView>(R.id.homeScroll).post {
+            findViewById<ScrollView>(R.id.homeScroll).fullScroll(View.FOCUS_DOWN)
+        }
+    }
+
+    private fun addChatBubble(container: LinearLayout, sender: String, message: String) {
+        val isUser = sender == "user"
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = if (isUser) Gravity.END else Gravity.START
+            setPadding(0, 0, 0, 9.dp)
+        }
+        val bubble = TextView(this).apply {
+            text = message
+            textSize = 14f
+            setTextColor(0xFF142D66.toInt())
+            setPadding(14.dp, 11.dp, 14.dp, 11.dp)
+            maxWidth = 280.dp
+            background = GradientDrawable().apply {
+                setColor(if (isUser) 0xFFDDF5F2.toInt() else Color.WHITE)
+                cornerRadius = 16.dp.toFloat()
+                if (!isUser) setStroke(1.dp, 0xFFE3EAF5.toInt())
+            }
+        }
+        row.addView(bubble, LinearLayout.LayoutParams(-2, -2))
+        container.addView(row, LinearLayout.LayoutParams(-1, -2))
+    }
+
+    private fun sendChatMessage() {
+        val question = chatInput.text.toString().trim()
+        if (question.isBlank() || chatSending) return
+        val service = chatService
+        if (!chatHistoryLoaded || service == null) {
+            setChatStatus(chatSetupError ?: chatLoadError ?: "Chat is still connecting. Try again shortly.")
+            return
+        }
+
+        chatSending = true
+        chatInput.text.clear()
+        setChatStatus("PesaPath is thinking…")
+        updateChatControls()
+        val summary = financialSummary()
+        val userMessage = mapOf(
+            "sender" to "user",
+            "text" to question.take(1000),
+            "createdAt" to System.currentTimeMillis()
+        )
+        chatStore.add(userMessage)
+            .addOnSuccessListener {
+                chatExecutor.execute {
+                    try {
+                        val response = runBlocking { service.reply(question, summary) }
+                            .take(4000)
+                            .ifBlank { "I couldn't form a response just now. Please try again." }
+                        runOnUiThread {
+                            if (isFinishing || isDestroyed) return@runOnUiThread
+                            chatStore.add(mapOf(
+                                "sender" to "assistant",
+                                "text" to response,
+                                "createdAt" to System.currentTimeMillis()
+                            )).addOnCompleteListener { saveTask ->
+                                chatSending = false
+                                if (saveTask.isSuccessful) setChatStatus("")
+                                else setChatStatus("The reply arrived but couldn't be saved. Check your connection and chat rules.")
+                                updateChatControls()
+                            }
+                        }
+                    } catch (error: Exception) {
+                        runOnUiThread {
+                            if (isFinishing || isDestroyed) return@runOnUiThread
+                            chatSending = false
+                            setChatStatus("Gemini couldn't reply: ${error.localizedMessage ?: "Check Firebase AI Logic setup and connection."}")
+                            updateChatControls()
+                        }
+                    }
+                }
+            }
+            .addOnFailureListener { error ->
+                chatSending = false
+                setChatStatus("Couldn't save your message: ${error.localizedMessage ?: "Check your connection and chat rules."}")
+                updateChatControls()
+            }
+    }
+
+    private fun financialSummary(): String {
+        val now = Calendar.getInstance()
+        val monthStart = (now.clone() as Calendar).apply {
+            set(Calendar.DAY_OF_MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val nextMonth = (now.clone() as Calendar).apply {
+            set(Calendar.DAY_OF_MONTH, 1)
+            add(Calendar.MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val monthly = transactions.filter { (it.getLong("date") ?: 0L) in monthStart until nextMonth }
+        val total = monthly.sumOf { it.getLong("amountCents") ?: 0L }
+        val categoriesSummary = categories.mapNotNull { category ->
+            val amount = monthly.filter { it.getString("category") == category }
+                .sumOf { it.getLong("amountCents") ?: 0L }
+            if (amount > 0L) "$category: ${money(amount)}" else null
+        }.joinToString()
+        val goalsSummary = goals.take(10).joinToString("; ") { goal ->
+            val title = goal.getString("title") ?: "Savings goal"
+            "$title: ${money(goal.getLong("savedCents") ?: 0L)} saved of ${money(goal.getLong("targetCents") ?: 0L)}"
+        }.ifBlank { "No savings goals recorded." }
+        return "Month: ${SimpleDateFormat("MMMM yyyy", Locale.UK).format(now.time)}. " +
+            "Spending: ${money(total)} across ${monthly.size} transactions. " +
+            "By category: ${categoriesSummary.ifBlank { "no category spending recorded" }}. " +
+            "Savings goals: $goalsSummary"
+    }
+
+    private fun setChatStatus(message: String) {
+        chatStatusView?.apply {
+            text = message
+            visibility = if (message.isBlank()) View.GONE else View.VISIBLE
+        }
+    }
+
+    private fun updateChatControls() {
+        if (!::chatSendButton.isInitialized) return
+        chatSendButton.isEnabled = chatHistoryLoaded && chatService != null && !chatSending
     }
 
     private fun transactionForm(record: QueryDocumentSnapshot?) {

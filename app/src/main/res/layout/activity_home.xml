@@ -16,6 +16,7 @@
         android:textSize="20sp"
         android:textStyle="bold" />
     <ScrollView
+        android:id="@+id/homeScroll"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
@@ -28,6 +29,46 @@
             android:orientation="vertical"
             android:padding="18dp" />
     </ScrollView>
+    <LinearLayout
+        android:id="@+id/chatComposer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:background="@android:color/white">
+        <EditText
+            android:id="@+id/chatInput"
+            android:layout_width="0dp"
+            android:layout_height="52dp"
+            android:layout_weight="1"
+            android:background="@drawable/chat_composer_field"
+            android:hint="Ask about your money"
+            android:inputType="textCapSentences|textMultiLine"
+            android:imeOptions="actionSend"
+            android:maxLength="1000"
+            android:maxLines="3"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:textColor="@color/ink"
+            android:textSize="15sp" />
+        <Button
+            android:id="@+id/chatSend"
+            android:layout_width="72dp"
+            android:layout_height="52dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/chat_composer_send"
+            android:minWidth="0dp"
+            android:text="Send"
+            android:textAllCaps="false"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+    </LinearLayout>
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="64dp"

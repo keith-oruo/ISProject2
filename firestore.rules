@@ -25,6 +25,15 @@ service cloud.firestore {
         && data.dueDate is int && data.dueDate > 0;
     }
 
+    function validChatMessage() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['sender', 'text', 'createdAt'])
+        && data.keys().hasOnly(['sender', 'text', 'createdAt'])
+        && data.sender in ['user', 'assistant']
+        && data.text is string && data.text.size() > 0 && data.text.size() <= 4000
+        && data.createdAt is int && data.createdAt > 0;
+    }
+
     match /users/{userId}/transactions/{transactionId} {
       allow read, delete: if isOwner(userId);
       allow create, update: if isOwner(userId) && validTransaction();
@@ -33,6 +42,11 @@ service cloud.firestore {
     match /users/{userId}/goals/{goalId} {
       allow read, delete: if isOwner(userId);
       allow create, update: if isOwner(userId) && validGoal();
+    }
+
+    match /users/{userId}/chatMessages/{messageId} {
+      allow read, delete: if isOwner(userId);
+      allow create: if isOwner(userId) && validChatMessage();
     }
   }
 }
