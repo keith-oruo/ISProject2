@@ -6,3 +6,4 @@ local.properties
 app/google-services.json
 *.iml
 *.docx
+firebase-debug.log

@@ -158,7 +158,7 @@ class HomeActivity : AppCompatActivity() {
                 chatLoadError = null
                 if (chatService == null) {
                     try {
-                        chatService = FinancialChatService().apply {
+                        chatService = FinancialChatService(this@HomeActivity).apply {
                             restore(chatDocuments.mapNotNull { record ->
                                 val sender = record.getString("sender") ?: return@mapNotNull null
                                 val text = record.getString("text") ?: return@mapNotNull null
@@ -564,6 +564,7 @@ class HomeActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 9.dp)
         }
         val bubble = TextView(this).apply {
+            if (!isUser) autoLinkMask = android.text.util.Linkify.WEB_URLS
             text = message
             textSize = 14f
             setTextColor(0xFF142D66.toInt())
