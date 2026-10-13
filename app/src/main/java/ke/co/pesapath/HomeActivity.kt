@@ -207,7 +207,7 @@ class HomeActivity : AppCompatActivity() {
 
     private fun dashboard() {
         val user = FirebaseAuth.getInstance().currentUser
-        val name = user?.displayName?.substringBefore(' ') ?: user?.email?.substringBefore('@') ?: "there"
+        val name = user?.displayName?.takeIf { it.isNotBlank() } ?: user?.email?.substringBefore('@') ?: "there"
         text("Hi, $name", 24f, true)
         text("Your finances, at a glance", 14f)
         val month = Calendar.getInstance().apply {

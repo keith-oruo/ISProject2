@@ -51,6 +51,19 @@
             android:textSize="21sp"
             android:textStyle="bold" />
         <EditText
+            android:id="@+id/fullName"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="24dp"
+            android:background="@drawable/auth_field"
+            android:hint="Full name"
+            android:inputType="textPersonName|textCapWords"
+            android:autofillHints="name"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:singleLine="true"
+            android:visibility="gone" />
+        <EditText
             android:id="@+id/email"
             android:layout_width="match_parent"
             android:layout_height="56dp"

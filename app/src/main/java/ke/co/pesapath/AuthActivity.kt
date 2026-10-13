@@ -12,9 +12,12 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.UserProfileChangeRequest
 
 class AuthActivity : AppCompatActivity() {
     private var registering = false
+    private var pendingRegistrationUser: FirebaseUser? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,6 +28,7 @@ class AuthActivity : AppCompatActivity() {
             view.setPadding(0, bars.top, 0, bars.bottom)
             insets
         }
+        val fullName = findViewById<EditText>(R.id.fullName)
         val email = findViewById<EditText>(R.id.email)
         val password = findViewById<EditText>(R.id.password)
         val submit = findViewById<Button>(R.id.submit)
@@ -45,8 +49,35 @@ class AuthActivity : AppCompatActivity() {
             finish()
             return
         }
+        fun setBusy(busy: Boolean) {
+            submit.isEnabled = !busy
+            switchMode.isEnabled = !busy && pendingRegistrationUser == null
+            reset.isEnabled = !busy
+            email.isEnabled = !busy && pendingRegistrationUser == null
+            password.isEnabled = !busy && pendingRegistrationUser == null
+            fullName.isEnabled = !busy
+        }
+        fun openHome() {
+            startActivity(Intent(this, HomeActivity::class.java))
+            finish()
+        }
+        fun saveFullName(user: FirebaseUser, name: String) {
+            pendingRegistrationUser = user
+            user.updateProfile(UserProfileChangeRequest.Builder().setDisplayName(name).build())
+                .addOnCompleteListener(this) { task ->
+                    if (task.isSuccessful) {
+                        pendingRegistrationUser = null
+                        openHome()
+                    } else {
+                        setBusy(false)
+                        error.text = "Your account was created, but your name could not be saved. Tap Register to retry."
+                        error.visibility = View.VISIBLE
+                    }
+                }
+        }
         switchMode.setOnClickListener {
             registering = !registering
+            fullName.visibility = if (registering) View.VISIBLE else View.GONE
             findViewById<TextView>(R.id.authHeading).text = if (registering) "Register" else "Log In"
             submit.text = if (registering) "REGISTER" else "LOGIN"
             switchMode.text = if (registering) "Already have an account? Log in" else "Don't have an account? Register"
@@ -56,20 +87,32 @@ class AuthActivity : AppCompatActivity() {
         submit.setOnClickListener {
             val address = email.text.toString().trim()
             val secret = password.text.toString()
+            val name = fullName.text.toString().trim()
+            if (registering && name.isBlank()) {
+                fullName.error = "Enter your full name"
+                fullName.requestFocus()
+                return@setOnClickListener
+            }
             if (!android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches() || secret.length < 8) {
                 error.text = "Enter a valid email and a password of at least 8 characters."
                 error.visibility = View.VISIBLE
                 return@setOnClickListener
             }
-            submit.isEnabled = false
+            error.visibility = View.GONE
+            setBusy(true)
+            pendingRegistrationUser?.let { user ->
+                saveFullName(user, name)
+                return@setOnClickListener
+            }
             val result = if (registering) auth.createUserWithEmailAndPassword(address, secret)
                 else auth.signInWithEmailAndPassword(address, secret)
             result.addOnCompleteListener(this) { task ->
-                submit.isEnabled = true
                 if (task.isSuccessful) {
-                    startActivity(Intent(this, HomeActivity::class.java))
-                    finish()
+                    val user = task.result?.user
+                    if (registering && user != null) saveFullName(user, name)
+                    else openHome()
                 } else {
+                    setBusy(false)
                     error.text = task.exception?.localizedMessage ?: "Authentication failed. Try again."
                     error.visibility = View.VISIBLE
                 }
