@@ -2,6 +2,10 @@
 .idea/
 build/
 app/build/
+node_modules/
+functions/lib/
+functions/.env*
+functions/.runtimeconfig.json
 local.properties
 app/google-services.json
 *.iml

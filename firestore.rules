@@ -48,5 +48,10 @@ service cloud.firestore {
       allow read, delete: if isOwner(userId);
       allow create: if isOwner(userId) && validChatMessage();
     }
+
+    match /users/{userId}/mpesaTransactions/{txId} {
+      allow read: if isOwner(userId);
+      allow write: if false;
+    }
   }
 }

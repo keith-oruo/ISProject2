@@ -26,3 +26,17 @@ Android fetches daily indicative KES exchange rates directly from ExchangeRate-A
 Successful responses are cached on the device for 24 hours. Requests have connection/read timeouts and the app rejects invalid or more-than-two-day-old data. If rates cannot be fetched or validated, budgeting chat continues with an explicit unavailable-data notice instead of supplying remembered rates. These are not live bank quotes and exclude fees/spreads; inflation, investment prices and historical data are not supplied. Gemini-generated conversion calculations are not independently verified by the app.
 
 The provider permits caching and personal/commercial currency conversion with attribution, but prohibits redistribution of its dataset. See [open-access documentation](https://www.exchangerate-api.com/docs/free) and [terms](https://www.exchangerate-api.com/terms). Firebase/Gemini free-tier quotas still apply separately.
+
+## M-Pesa payments (Daraja)
+
+The Payments screen starts a Daraja STK Push through a Firebase callable function. Daraja credentials are stored as Firebase Functions secrets and are never included in the Android app. Payment records are written by the backend, and only the server-side callback can change their status. The app listens to Firestore for callback-confirmed status and amount updates.
+
+The current Functions configuration uses Node.js 22 and defaults to the Daraja sandbox. In the Firebase project selected for this app:
+
+1. Install the Firebase CLI and select the same project used by `app/google-services.json` with `firebase use --add`. Cloud Functions deployment requires a Firebase plan that supports Functions and a linked billing account.
+2. Set each Daraja credential with `firebase functions:secrets:set DARAJA_CONSUMER_KEY`, `firebase functions:secrets:set DARAJA_CONSUMER_SECRET`, `firebase functions:secrets:set DARAJA_SHORT_CODE`, and `firebase functions:secrets:set DARAJA_PASS_KEY`. The CLI prompts for each value. Use the sandbox credentials and shortcode for sandbox testing. Do not put secret values in source files or the Android app.
+3. Use Node.js 22, then build the function from `functions/` with `npm install` and `npm run build`.
+4. Deploy the callback, callable function, and Firestore rules with `firebase deploy --only functions,firestore:rules`.
+5. Test using a Daraja sandbox SIM and confirm the callback reaches the deployed `darajaCallback` endpoint. Before production, set `DARAJA_BASE_URL=https://api.safaricom.co.ke` in an ignored `functions/.env.<project-id>` file and use the matching production credentials, shortcode, passkey, and Safaricom-approved callback setup.
+
+The payment flow currently supports customer-initiated Paybill STK Push transactions through this app. It tracks only payments initiated through PesaPath; Daraja does not provide access here to a customer's unrelated M-Pesa wallet balance or complete wallet statement. Amounts must be whole Kenyan shillings, from KES 1 through KES 250,000. Do not rely on a pending payment as completed until its Daraja callback has been verified.

@@ -66,6 +66,9 @@ class FinancialChatService(context: Context) {
             guarantee returns, make investment decisions for the user, or execute payments/transfers. If asked
             to do something outside this scope, explain the limit and offer safe general guidance. Never ask for
             passwords, PINs, card numbers, or authentication codes. Remind the user to verify important decisions.
+            Write every reply as a short, natural English conversation. Use complete sentences and ordinary
+            punctuation. Do not use markdown, headings, bullet points, numbered lists, hashtags, emojis,
+            asterisks, underscores, backticks, or decorative symbols. Explain steps in sentences instead.
         """
     }
 }

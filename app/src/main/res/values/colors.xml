@@ -1,0 +1,13 @@
+<resources>
+    <color name="pine">#18B8AC</color>
+    <color name="pineDark">#183D82</color>
+    <color name="ink">#F5F7FA</color>
+    <color name="inkSoft">#C3CBD5</color>
+    <color name="canvas">#17191E</color>
+    <color name="surface">#24272D</color>
+    <color name="border">#373B43</color>
+    <color name="muted">#9AA4B0</color>
+    <color name="softBlue">#20363B</color>
+    <color name="errorBg">#3A2226</color>
+    <color name="errorText">#FF8585</color>
+</resources>
