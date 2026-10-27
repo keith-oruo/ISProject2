@@ -7,11 +7,11 @@
     <TextView
         android:id="@+id/pageTitle"
         android:layout_width="match_parent"
-        android:layout_height="56dp"
+        android:layout_height="60dp"
         android:gravity="center_vertical|start"
         android:paddingStart="20dp"
         android:paddingEnd="20dp"
-        android:background="@drawable/auth_hero"
+        android:background="@drawable/home_header"
         android:text="Dashboard"
         android:textColor="@android:color/white"
         android:textSize="20sp"
@@ -82,11 +82,11 @@
         android:gravity="center_vertical"
         android:background="@color/surface"
         android:orientation="horizontal">
-        <Button android:id="@+id/homeTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="4dp" android:paddingEnd="4dp" android:includeFontPadding="false" android:maxLines="1" android:text="Home" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="11sp" />
-        <Button android:id="@+id/transactionsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="4dp" android:paddingEnd="4dp" android:includeFontPadding="false" android:maxLines="1" android:text="Activity" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="11sp" />
-        <Button android:id="@+id/paymentsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="4dp" android:paddingEnd="4dp" android:includeFontPadding="false" android:maxLines="1" android:text="Payments" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="11sp" />
-        <Button android:id="@+id/chatTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="4dp" android:paddingEnd="4dp" android:includeFontPadding="false" android:maxLines="1" android:text="Chat" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="11sp" />
-        <Button android:id="@+id/goalsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="4dp" android:paddingEnd="4dp" android:includeFontPadding="false" android:maxLines="1" android:text="Goals" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="11sp" />
-        <Button android:id="@+id/profileTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="4dp" android:paddingEnd="4dp" android:includeFontPadding="false" android:maxLines="1" android:text="Profile" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="11sp" />
+        <Button android:id="@+id/homeTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Home" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="10sp" />
+        <Button android:id="@+id/transactionsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Activity" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="10sp" />
+        <Button android:id="@+id/paymentsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Pay" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="10sp" />
+        <Button android:id="@+id/chatTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Chat" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="10sp" />
+        <Button android:id="@+id/goalsTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Goals" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="10sp" />
+        <Button android:id="@+id/profileTab" style="?attr/borderlessButtonStyle" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:minWidth="0dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:includeFontPadding="false" android:maxLines="1" android:text="Profile" android:textColor="@color/inkSoft" android:textAllCaps="false" android:textSize="10sp" />
     </LinearLayout>
 </LinearLayout>

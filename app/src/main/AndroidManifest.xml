@@ -5,7 +5,13 @@
         android:label="PesaPath"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
-        <activity android:name=".HomeActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".HomeActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
         <activity android:name=".AuthActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

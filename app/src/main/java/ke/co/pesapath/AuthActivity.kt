@@ -45,7 +45,7 @@ class AuthActivity : AppCompatActivity() {
         }
         val auth = FirebaseAuth.getInstance()
         if (auth.currentUser != null) {
-            startActivity(Intent(this, HomeActivity::class.java))
+            startActivity(homeIntent())
             finish()
             return
         }
@@ -58,7 +58,7 @@ class AuthActivity : AppCompatActivity() {
             fullName.isEnabled = !busy
         }
         fun openHome() {
-            startActivity(Intent(this, HomeActivity::class.java))
+            startActivity(homeIntent())
             finish()
         }
         fun saveFullName(user: FirebaseUser, name: String) {
@@ -117,6 +117,7 @@ class AuthActivity : AppCompatActivity() {
                     error.visibility = View.VISIBLE
                 }
             }
+
         }
         reset.setOnClickListener {
             val address = email.text.toString().trim()
@@ -129,6 +130,17 @@ class AuthActivity : AppCompatActivity() {
                         task.exception?.localizedMessage ?: "Could not send reset email."
                     error.visibility = View.VISIBLE
                 }
+            }
+        }
+    }
+
+    private fun homeIntent(): Intent = Intent(this, HomeActivity::class.java).apply {
+        if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+            val sharedText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+            if (!sharedText.isNullOrBlank()) {
+                action = Intent.ACTION_SEND
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, sharedText.take(4_000))
             }
         }
     }

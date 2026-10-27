@@ -8,11 +8,38 @@ service cloud.firestore {
     function validTransaction() {
       let data = request.resource.data;
       return data.keys().hasAll(['amountCents', 'category', 'date', 'note'])
-        && data.keys().hasOnly(['amountCents', 'category', 'date', 'note'])
+        && data.keys().hasOnly(['amountCents', 'category', 'subcategory', 'date', 'note', 'sourceMpesaId', 'recordedAt'])
         && data.amountCents is int && data.amountCents > 0
-        && data.category in ['Food', 'Transport', 'Rent', 'Shopping', 'Bills', 'Other']
+        && data.category in ['Food', 'Transport', 'Rent', 'Shopping', 'Bills', 'Subscriptions', 'Other']
         && data.date is int && data.date > 0
-        && data.note is string && data.note.size() <= 500;
+        && data.note is string && data.note.size() <= 500
+        && (!data.keys().hasAny(['subcategory']) || validSubcategory(data.category, data.subcategory))
+        && (!data.keys().hasAny(['sourceMpesaId'])
+          || (data.sourceMpesaId is string
+            && data.sourceMpesaId.matches('^mpesa_[a-f0-9]{64}$')))
+        && (!data.keys().hasAny(['recordedAt'])
+          || (data.recordedAt is int && data.recordedAt > 0));
+    }
+
+    function validBalance() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['balanceCents', 'updatedAt'])
+        && data.keys().hasOnly(['balanceCents', 'updatedAt'])
+        && data.balanceCents is int && data.balanceCents >= 0
+        && data.updatedAt is int && data.updatedAt > 0;
+    }
+
+    function validSubcategory(category, subcategory) {
+      return (category == 'Food' && subcategory in ['Groceries', 'Dining', 'Coffee', 'Takeaway', 'Other'])
+        || (category == 'Transport' && subcategory in ['Fuel', 'Public transport', 'Ride hailing', 'Parking', 'Other'])
+        || (category == 'Rent' && subcategory in ['Housing', 'Maintenance', 'Other'])
+        || (category == 'Shopping' && subcategory in ['Clothing', 'Home', 'Electronics', 'Personal care', 'Other'])
+        || (category == 'Bills' && subcategory in ['Utilities', 'Internet', 'Phone', 'Other'])
+        || (category == 'Subscriptions' && subcategory in [
+          'Business', 'Entertainment', 'Music and streaming', 'Software', 'Education',
+          'Health and fitness', 'Other'
+        ])
+        || (category == 'Other' && subcategory in ['General', 'Other']);
     }
 
     function validGoal() {
@@ -47,6 +74,14 @@ service cloud.firestore {
     match /users/{userId}/chatMessages/{messageId} {
       allow read, delete: if isOwner(userId);
       allow create: if isOwner(userId) && validChatMessage();
+    }
+
+    match /users/{userId}/settings/{settingId} {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId)
+        && settingId == 'currentBalance'
+        && validBalance();
+      allow delete: if false;
     }
 
     match /users/{userId}/mpesaTransactions/{txId} {

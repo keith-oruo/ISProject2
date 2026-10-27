@@ -10,8 +10,10 @@ import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
+import android.widget.AdapterView
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -22,8 +24,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.graphics.drawable.DrawableCompat
+import androidx.appcompat.content.res.AppCompatResources
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.CollectionReference
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
@@ -38,7 +43,19 @@ import java.util.concurrent.Executors
 import kotlinx.coroutines.runBlocking
 
 class HomeActivity : AppCompatActivity() {
-    private val categories = listOf("Food", "Transport", "Rent", "Shopping", "Bills", "Other")
+    private val categories = listOf("Food", "Transport", "Rent", "Shopping", "Bills", "Subscriptions", "Other")
+    private val subcategories = mapOf(
+        "Food" to listOf("Groceries", "Dining", "Coffee", "Takeaway", "Other"),
+        "Transport" to listOf("Fuel", "Public transport", "Ride hailing", "Parking", "Other"),
+        "Rent" to listOf("Housing", "Maintenance", "Other"),
+        "Shopping" to listOf("Clothing", "Home", "Electronics", "Personal care", "Other"),
+        "Bills" to listOf("Utilities", "Internet", "Phone", "Other"),
+        "Subscriptions" to listOf(
+            "Business", "Entertainment", "Music and streaming", "Software", "Education",
+            "Health and fitness", "Other"
+        ),
+        "Other" to listOf("General", "Other")
+    )
     private val transactions = mutableListOf<QueryDocumentSnapshot>()
     private val goals = mutableListOf<QueryDocumentSnapshot>()
     private val dateFormat = SimpleDateFormat("dd MMM yyyy", Locale.UK)
@@ -49,6 +66,7 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var transactionStore: CollectionReference
     private lateinit var goalStore: CollectionReference
     private lateinit var chatStore: CollectionReference
+    private lateinit var balanceStore: DocumentReference
     private lateinit var content: LinearLayout
     private lateinit var heading: TextView
     private lateinit var chatComposer: LinearLayout
@@ -57,6 +75,7 @@ class HomeActivity : AppCompatActivity() {
     private val chatDocuments = mutableListOf<QueryDocumentSnapshot>()
     private var transactionListener: ListenerRegistration? = null
     private var goalListener: ListenerRegistration? = null
+    private var balanceListener: ListenerRegistration? = null
     private var chatListener: ListenerRegistration? = null
     private var chatMessagesContainer: LinearLayout? = null
     private var chatStatusView: TextView? = null
@@ -68,6 +87,9 @@ class HomeActivity : AppCompatActivity() {
     private val chatExecutor = Executors.newSingleThreadExecutor()
     private var page = "Home"
     private var errorMessage: String? = null
+    private var balanceSnapshotCents: Long? = null
+    private var balanceSnapshotAt: Long? = null
+    private var balanceLoadError: String? = null
 
     // M-Pesa
     private lateinit var mpesaService: MpesaService
@@ -93,7 +115,13 @@ class HomeActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val user = FirebaseAuth.getInstance().currentUser
         if (user == null) {
-            startActivity(Intent(this, AuthActivity::class.java))
+            startActivity(Intent(this, AuthActivity::class.java).apply {
+                if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+                    putExtra(Intent.EXTRA_TEXT, intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.take(4_000))
+                    action = Intent.ACTION_SEND
+                    type = "text/plain"
+                }
+            })
             finish()
             return
         }
@@ -109,6 +137,7 @@ class HomeActivity : AppCompatActivity() {
         transactionStore = userStore.collection("transactions")
         goalStore = userStore.collection("goals")
         chatStore = userStore.collection("chatMessages")
+        balanceStore = userStore.collection("settings").document("currentBalance")
         mpesaService = MpesaService()
         chatComposer = findViewById(R.id.chatComposer)
         chatInput = findViewById(R.id.chatInput)
@@ -134,6 +163,16 @@ class HomeActivity : AppCompatActivity() {
             }
             if (page == "Home" || page == "Transactions") show(page)
         }
+        balanceListener = balanceStore.addSnapshotListener { snapshot, error ->
+            if (error != null) {
+                balanceLoadError = "Could not load current balance: ${error.localizedMessage ?: "Check your connection."}"
+            } else {
+                balanceLoadError = null
+                balanceSnapshotCents = snapshot?.getLong("balanceCents")
+                balanceSnapshotAt = snapshot?.getLong("updatedAt")
+            }
+            if (page == "Home") show("Home")
+        }
         goalListener = goalStore.addSnapshotListener { snapshot, error ->
             if (error != null) errorMessage = "Could not load goals: ${error.localizedMessage}"
             else if (snapshot != null) {
@@ -145,11 +184,13 @@ class HomeActivity : AppCompatActivity() {
         loadChatHistory()
         loadMpesaHistory()
         show("Home")
+        handleSharedMpesaMessage(intent)
     }
 
     override fun onDestroy() {
         transactionListener?.remove()
         goalListener?.remove()
+        balanceListener?.remove()
         chatListener?.remove()
         mpesaListener?.remove()
         chatExecutor.shutdownNow()
@@ -234,6 +275,118 @@ class HomeActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleSharedMpesaMessage(sharedIntent: Intent?) {
+        if (sharedIntent?.action != Intent.ACTION_SEND || sharedIntent.type != "text/plain") return
+        val text = sharedIntent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString().orEmpty()
+        val importedBalance = MpesaSmsParser.parseBalanceCents(text)
+        if (importedBalance != null) {
+            AlertDialog.Builder(this)
+                .setTitle("Import M-Pesa balance?")
+                .setMessage("PesaPath read ${money(importedBalance)} from the balance message you shared. Use this as your new starting balance?")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Use balance") { _, _ -> saveBalanceSnapshot(importedBalance) }
+                .show()
+            return
+        }
+        val imported = MpesaSmsParser.parse(text)
+        if (imported == null) {
+            AlertDialog.Builder(this)
+                .setTitle("Could not read this payment")
+                .setMessage("Share a completed M-Pesa payment message. Incoming payments, reversals, and unsupported messages cannot be added as spending.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        transactionForm(importedMessage = imported)
+    }
+
+    private fun showMpesaImportHelp() {
+        AlertDialog.Builder(this)
+            .setTitle("Import from M-Pesa")
+            .setMessage(
+                "To import your balance, share a M-Pesa balance-inquiry message with PesaPath and confirm the amount. " +
+                    "To add spending, share a completed payment message and review its details. PesaPath only receives the message you select; it does not read your inbox."
+            )
+            .setPositiveButton("Got it", null)
+            .show()
+    }
+
+    private fun darajaSourceId(transaction: MpesaTransaction): String {
+        val source = transaction.id ?: transaction.checkoutRequestId
+            ?: "${transaction.phone}:${transaction.createdAt}:${transaction.amountCents}"
+        val bytes = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("daraja:$source".toByteArray(Charsets.UTF_8))
+        return "mpesa_" + bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun isAlreadyImported(sourceId: String): Boolean =
+        transactions.any { it.getString("sourceMpesaId") == sourceId }
+
+    private fun currentBalanceCents(): Long? {
+        val baseBalance = balanceSnapshotCents ?: return null
+        val snapshotAt = balanceSnapshotAt ?: return baseBalance
+        val spendingSinceSnapshot = transactions.sumOf { record ->
+            val recordedAt = record.getLong("recordedAt") ?: return@sumOf 0L
+            if (recordedAt > snapshotAt) record.getLong("amountCents") ?: 0L else 0L
+        }
+        return baseBalance - spendingSinceSnapshot
+    }
+
+    private fun showBalanceUpdateDialog() {
+        val amountInput = EditText(this).apply {
+            hint = "Amount in KES"
+            inputType = 8194
+            setText(balanceSnapshotCents?.let {
+                BigDecimal.valueOf(it, 2).toPlainString()
+            }.orEmpty())
+            setSingleLine(true)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24.dp, 8.dp, 24.dp, 0)
+            addView(amountInput, LinearLayout.LayoutParams(-1, 56.dp))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Update current balance")
+            .setMessage("Enter the balance you have now. New spending added afterward will be deducted automatically.")
+            .setView(container)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", null)
+            .create()
+            .also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val cents = parseCents(amountInput.text.toString())
+                        if (cents == null || cents < 0L) {
+                            amountInput.error = "Enter a valid non-negative balance"
+                            return@setOnClickListener
+                        }
+                        saveBalanceSnapshot(cents)
+                        dialog.dismiss()
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    private fun saveBalanceSnapshot(balanceCents: Long) {
+        val updatedAt = System.currentTimeMillis()
+        balanceStore.set(mapOf("balanceCents" to balanceCents, "updatedAt" to updatedAt))
+            .addOnSuccessListener {
+                balanceSnapshotCents = balanceCents
+                balanceSnapshotAt = updatedAt
+                balanceLoadError = null
+                if (page == "Home") show("Home")
+            }
+            .addOnFailureListener { error ->
+                AlertDialog.Builder(this)
+                    .setTitle("Could not update balance")
+                    .setMessage(error.localizedMessage ?: "Check your connection and try again.")
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+    }
+
     private fun show(destination: String) {
         page = destination
         chatComposer.visibility = if (destination == "Chat") View.VISIBLE else View.GONE
@@ -246,11 +399,29 @@ class HomeActivity : AppCompatActivity() {
             "Goals" -> "Savings Goals"
             else -> "Profile"
         }
-        listOf(
-            R.id.homeTab to "Home", R.id.transactionsTab to "Transactions", R.id.paymentsTab to "Payments",
-            R.id.chatTab to "Chat", R.id.goalsTab to "Goals", R.id.profileTab to "Profile"
-        ).forEach { (id, tab) ->
-            findViewById<Button>(id).setTextColor(if (destination == tab) C_PINE else C_INK_SOFT)
+        val tabs = listOf(
+            Triple(R.id.homeTab, "Home", R.drawable.ic_home),
+            Triple(R.id.transactionsTab, "Transactions", R.drawable.ic_activity),
+            Triple(R.id.paymentsTab, "Payments", R.drawable.ic_payments),
+            Triple(R.id.chatTab, "Chat", R.drawable.ic_chat),
+            Triple(R.id.goalsTab, "Goals", R.drawable.ic_goals),
+            Triple(R.id.profileTab, "Profile", R.drawable.ic_profile)
+        )
+        tabs.forEach { (id, tab, icon) ->
+            val selected = destination == tab
+            findViewById<Button>(id).apply {
+                setTextColor(if (selected) C_PINE else C_INK_SOFT)
+                val drawable = AppCompatResources.getDrawable(this@HomeActivity, icon)?.mutate()
+                drawable?.let { DrawableCompat.setTint(it, if (selected) C_PINE else C_MUTED) }
+                setCompoundDrawablesWithIntrinsicBounds(null, drawable, null, null)
+                compoundDrawablePadding = 3.dp
+                gravity = Gravity.CENTER
+                setPadding(1.dp, 5.dp, 1.dp, 3.dp)
+                background = roundedBackground(
+                    if (selected) C_SOFT_BLUE else Color.TRANSPARENT,
+                    14.dp
+                )
+            }
         }
         errorMessage?.let { text(it, 14f).setTextColor(C_ERROR_TEXT) }
         when (destination) {
@@ -266,8 +437,47 @@ class HomeActivity : AppCompatActivity() {
     private fun dashboard() {
         val user = FirebaseAuth.getInstance().currentUser
         val name = user?.displayName?.takeIf { it.isNotBlank() } ?: user?.email?.substringBefore('@') ?: "there"
-        text("Hi, $name", 24f, true)
-        text("Your finances, at a glance", 14f)
+        val welcome = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val greeting = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        addText(greeting, "Good day,", 13f, false, C_MUTED)
+        addText(greeting, name, 22f, true, C_INK, top = 2.dp)
+        welcome.addView(greeting, LinearLayout.LayoutParams(0, -2, 1f))
+        val profileIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_profile)
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            background = roundedBackground(C_PINE_DARK, 18.dp)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { show("Profile") }
+        }
+        welcome.addView(profileIcon, LinearLayout.LayoutParams(48.dp, 48.dp))
+        content.addView(welcome)
+        val balanceCard = panel()
+        addText(balanceCard, "CURRENT BALANCE", 12f, true, C_MUTED)
+        val currentBalance = currentBalanceCents()
+        addText(
+            balanceCard,
+            if (balanceLoadError != null) "Unavailable" else currentBalance?.let(::money) ?: "Set your balance",
+            26f,
+            true,
+            C_INK,
+            top = 6.dp
+        )
+        val balanceDetail = when {
+            balanceLoadError != null -> balanceLoadError.orEmpty()
+            balanceSnapshotCents == null -> "Add a starting balance or import a balance message"
+            else -> "New spending is deducted from the balance you set"
+        }
+        addText(balanceCard, balanceDetail, 12f, false, C_MUTED, top = 4.dp)
+        balanceCard.addView(styledButton("Update balance", false, ::showBalanceUpdateDialog),
+            LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 10.dp })
+        balanceCard.addView(styledButton("Import M-Pesa balance", false, ::showMpesaImportHelp),
+            LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 8.dp })
+        content.addView(balanceCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 16.dp })
         val month = Calendar.getInstance().apply {
             set(Calendar.DAY_OF_MONTH, 1)
             set(Calendar.HOUR_OF_DAY, 0)
@@ -287,20 +497,40 @@ class HomeActivity : AppCompatActivity() {
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
                 intArrayOf(C_PINE.toInt(), C_PINE_DARK.toInt())).apply { cornerRadius = 22.dp.toFloat() }
         }
-        addText(summary, "MONTHLY SPENDING", 12f, true, 0xFFB9E5FF.toInt())
+        val summaryHeading = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val walletIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_payments)
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+        }
+        summaryHeading.addView(walletIcon, LinearLayout.LayoutParams(22.dp, 22.dp).apply { marginEnd = 8.dp })
+        addText(summaryHeading, "MONTHLY SPENDING", 12f, true, 0xFFE6F7FF.toInt())
+        summary.addView(summaryHeading)
         addText(summary, SimpleDateFormat("MMMM yyyy", Locale.UK).format(Calendar.getInstance().time),
             14f, false, Color.WHITE)
         addText(summary, money(total), 30f, true, Color.WHITE)
         addText(summary, "${monthly.size} transactions this month", 13f, false, 0xFFB9E5FF.toInt())
         content.addView(summary, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 18.dp })
 
-        text("Your shortcuts", 18f, true)
-        val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        actionRow.addView(actionTile("+", "Add transaction", "Record spending") { transactionForm(null) },
-            LinearLayout.LayoutParams(0, 104.dp, 1f).apply { marginEnd = 7.dp })
-        actionRow.addView(actionTile("⟲", "Payments", "Send via M-Pesa") { show("Payments") },
-            LinearLayout.LayoutParams(0, 104.dp, 1f).apply { marginStart = 7.dp })
-        content.addView(actionRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
+        text("Quick actions", 18f, true)
+        val firstActionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        firstActionRow.addView(actionTile(R.drawable.ic_add, "Add expense", "Record a purchase") {
+            transactionForm(null)
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = 7.dp })
+        firstActionRow.addView(actionTile(R.drawable.ic_payments, "M-Pesa activity", "View payments") {
+            show("Payments")
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = 7.dp })
+        content.addView(firstActionRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
+        val secondActionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        secondActionRow.addView(actionTile(R.drawable.ic_sms, "Import M-Pesa", "Share a payment SMS") {
+            showMpesaImportHelp()
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = 7.dp })
+        secondActionRow.addView(actionTile(R.drawable.ic_goals, "Savings goals", "Track your plans") {
+            show("Goals")
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = 7.dp })
+        content.addView(secondActionRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
 
         val breakdownCard = panel()
         addText(breakdownCard, "Spending by category", 17f, true, C_INK)
@@ -321,7 +551,7 @@ class HomeActivity : AppCompatActivity() {
                 max = 100
                 progress = (amount.toDouble() * 100 / total).toInt().coerceIn(0, 100)
                 progressTintList = android.content.res.ColorStateList.valueOf(C_PINE)
-                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0xFFE6EDF7.toInt())
+                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0xFF3B424B.toInt())
             }, LinearLayout.LayoutParams(-1, 8.dp).apply { topMargin = 6.dp })
         }
         content.addView(breakdownCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 18.dp })
@@ -349,8 +579,10 @@ class HomeActivity : AppCompatActivity() {
         recent.forEach { record ->
             val item = panel().apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val category = record.getString("category") ?: "Other"
+            val subcategory = record.getString("subcategory").orEmpty()
             val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            addText(details, category, 15f, true, C_INK)
+            addText(details, listOf(category, subcategory).filter { it.isNotBlank() }.joinToString("  ·  "),
+                15f, true, C_INK)
             addText(details, dateFormat.format(record.getLong("date") ?: 0L), 12f, false, C_MUTED)
             item.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
             addText(item, "-${money(record.getLong("amountCents") ?: 0L)}", 14f, true, C_INK)
@@ -368,21 +600,33 @@ class HomeActivity : AppCompatActivity() {
         }
     }
 
-    private fun actionTile(symbol: String, title: String, subtitle: String, onClick: () -> Unit): LinearLayout =
+    private fun roundedBackground(color: Int, radiusDp: Int): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusDp.toFloat()
+        }
+
+    private fun actionTile(icon: Int, title: String, subtitle: String, onClick: () -> Unit): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(14.dp, 12.dp, 14.dp, 12.dp)
-            background = GradientDrawable().apply {
-                setColor(C_SOFT_BLUE)
-                cornerRadius = 16.dp.toFloat()
-            }
+            minimumHeight = 128.dp
+            setPadding(16.dp, 16.dp, 14.dp, 16.dp)
+            background = roundedBackground(C_SURFACE, 18.dp).apply { setStroke(1.dp, C_BORDER) }
             isClickable = true
             isFocusable = true
             setOnClickListener { onClick() }
-            addText(this, symbol, 21f, true, C_PINE)
-            addText(this, title, 14f, true, C_INK)
-            addText(this, subtitle, 11f, false, C_MUTED)
+            val iconHolder = LinearLayout(this@HomeActivity).apply {
+                gravity = Gravity.CENTER
+                background = roundedBackground(C_SOFT_BLUE, 14.dp)
+            }
+            iconHolder.addView(ImageView(this@HomeActivity).apply {
+                setImageResource(icon)
+                imageTintList = android.content.res.ColorStateList.valueOf(C_PINE)
+            }, LinearLayout.LayoutParams(24.dp, 24.dp))
+            addView(iconHolder, LinearLayout.LayoutParams(46.dp, 46.dp).apply { bottomMargin = 10.dp })
+            addText(this, title, 15f, true, C_INK)
+            addText(this, subtitle, 12f, false, C_MUTED, top = 4.dp)
         }
 
     private fun addText(
@@ -429,6 +673,16 @@ class HomeActivity : AppCompatActivity() {
     private fun transactionList() {
         pageBanner("SPENDING ACTIVITY", "Every move, in one place", "${transactions.size} transactions recorded")
         button("+ Add Transaction") { transactionForm(null) }
+        val importActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        importActions.addView(
+            styledButton("Import M-Pesa SMS", false, { showMpesaImportHelp() }),
+            LinearLayout.LayoutParams(0, 48.dp, 1f).apply { marginEnd = 5.dp }
+        )
+        importActions.addView(
+            styledButton("M-Pesa activity", false, { show("Payments") }),
+            LinearLayout.LayoutParams(0, 48.dp, 1f).apply { marginStart = 5.dp }
+        )
+        content.addView(importActions, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
         val sorted = transactions.sortedByDescending { it.getLong("date") ?: 0L }
         if (sorted.isEmpty()) emptyPanel("No activity yet", "Add your first transaction to start tracking your spending.")
         sorted.forEach { record ->
@@ -450,7 +704,10 @@ class HomeActivity : AppCompatActivity() {
             }
             row.addView(marker, LinearLayout.LayoutParams(42.dp, 42.dp).apply { marginEnd = 12.dp })
             val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            addText(details, record.getString("category") ?: "Other", 15f, true, C_INK)
+            val category = record.getString("category") ?: "Other"
+            val subcategory = record.getString("subcategory").orEmpty()
+            addText(details, listOf(category, subcategory).filter { it.isNotBlank() }.joinToString("  ·  "),
+                15f, true, C_INK)
             addText(details, record.getString("note").orEmpty().ifBlank {
                 dateFormat.format(record.getLong("date") ?: 0L)
             }, 12f, false, C_MUTED)
@@ -509,8 +766,12 @@ class HomeActivity : AppCompatActivity() {
     }
 
     private fun payments() {
-        pageBanner("PAYMENTS", "Pay with M-Pesa", "Confirm the secure payment request on your phone")
+        pageBanner("M-PESA ACTIVITY", "Payments and imports", "Track PesaPath payments or import a shared payment message")
         mpesaLoadError?.let { text(it, 13f).setTextColor(C_ERROR_TEXT) }
+        styledButton("Import a M-Pesa SMS", false, { showMpesaImportHelp() }).also {
+            content.addView(it, LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 10.dp })
+        }
+        text("Start a payment", 17f, true)
         val phone = input("Phone number", "07XXXXXXXX", 1)
         val amount = input("Amount (KES)", "", 8194)
         val statusView = TextView(this).apply {
@@ -570,15 +831,43 @@ class HomeActivity : AppCompatActivity() {
         if (recent.isEmpty()) {
             emptyPanel("No payments yet", "Your M-Pesa payments will appear here once you send money.")
         } else {
-            text("Recent payments", 16f, true)
+            text("PesaPath Daraja payments", 17f, true)
             recent.forEach { tx ->
-                val item = panel().apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                val item = panel()
+                val transactionRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
                 val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                addText(details, "To ${maskPhone(tx.phone)}", 14f, true, C_INK)
-                addText(details, "${money(tx.amountCents)}  •  ${statusLabel(tx.status)}", 12f, false,
+                addText(details, "M-Pesa payment", 14f, true, C_INK)
+                addText(details, "${money(tx.amountCents)}  ·  ${statusLabel(tx.status)}", 12f, false,
                     if (tx.status == MpesaService.STATUS_COMPLETED) C_PINE else C_MUTED)
-                item.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
-                addText(item, dateFormat.format(tx.createdAt), 11f, false, C_MUTED, left = 54.dp, top = 5.dp)
+                transactionRow.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
+                addText(transactionRow, dateFormat.format(tx.createdAt), 11f, false, C_MUTED)
+                item.addView(transactionRow)
+                if (tx.status == MpesaService.STATUS_COMPLETED) {
+                    val sourceId = darajaSourceId(tx)
+                    val imported = isAlreadyImported(sourceId)
+                    val importButton = styledButton(
+                        if (imported) "Added to activity" else "Add to spending",
+                        primary = !imported,
+                        onClick = {
+                            if (!imported) {
+                                transactionForm(
+                                    importedMessage = ImportedMpesaMessage(
+                                        sourceId = sourceId,
+                                        amountCents = tx.amountCents,
+                                        date = tx.createdAt,
+                                        note = "M-Pesa payment"
+                                    )
+                                )
+                            }
+                        }
+                    ).apply {
+                        isEnabled = !imported
+                    }
+                    item.addView(importButton, LinearLayout.LayoutParams(-1, 42.dp).apply { topMargin = 12.dp })
+                }
                 content.addView(item, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
             }
         }
@@ -841,19 +1130,59 @@ class HomeActivity : AppCompatActivity() {
         chatSendButton.isEnabled = chatHistoryLoaded && chatService != null && !chatSending
     }
 
-    private fun transactionForm(record: QueryDocumentSnapshot?) {
+    private fun transactionForm(
+        record: QueryDocumentSnapshot? = null,
+        importedMessage: ImportedMpesaMessage? = null
+    ) {
         page = "Transaction form"
-        heading.text = if (record == null) "Add Transaction" else "Edit Transaction"
+        heading.text = when {
+            record != null -> "Edit Transaction"
+            importedMessage != null -> "Import Payment"
+            else -> "Add Transaction"
+        }
         content.removeAllViews()
-        pageBanner("SPENDING ACTIVITY", "Record a transaction", "Add the amount and details below")
-        val amount = input("Amount (KES)", record?.getLong("amountCents")?.let { BigDecimal.valueOf(it, 2).toPlainString() }.orEmpty(), 8194)
+        pageBanner(
+            if (importedMessage != null) "M-PESA IMPORT" else "SPENDING ACTIVITY",
+            if (importedMessage != null) "Review this payment" else "Record a transaction",
+            if (importedMessage != null) "Check the details and choose a category before saving" else "Add the amount and details below"
+        )
+        val initialAmount = record?.getLong("amountCents") ?: importedMessage?.amountCents
+        val amount = input("Amount (KES)", initialAmount?.let {
+            BigDecimal.valueOf(it, 2).toPlainString()
+        }.orEmpty(), 8194)
         text("Category", 14f)
+        val initialCategory = record?.getString("category") ?: "Other"
         val category = Spinner(this).apply {
             adapter = ArrayAdapter(this@HomeActivity, android.R.layout.simple_spinner_dropdown_item, categories)
-            setSelection(categories.indexOf(record?.getString("category")).coerceAtLeast(0))
+            setSelection(categories.indexOf(initialCategory).coerceAtLeast(0))
         }
         content.addView(category)
-        var date = record?.getLong("date") ?: System.currentTimeMillis()
+        text("Subcategory", 14f)
+        val subcategory = Spinner(this)
+        fun updateSubcategories(selected: String?) {
+            val options = subcategories[category.selectedItem?.toString()] ?: listOf("Other")
+            subcategory.adapter = ArrayAdapter(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                options
+            )
+            subcategory.setSelection(options.indexOf(selected).coerceAtLeast(0))
+        }
+        category.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val selected = if (categories[position] == initialCategory) {
+                    record?.getString("subcategory") ?: "Other"
+                } else {
+                    "Other"
+                }
+                updateSubcategories(selected)
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        content.addView(subcategory)
+        updateSubcategories(record?.getString("subcategory") ?: "Other")
+        var date = record?.getLong("date") ?: importedMessage?.date ?: System.currentTimeMillis()
         val dateButton = button("Date: ${dateFormat.format(date)}") { }
         dateButton.setOnClickListener {
             val calendar = Calendar.getInstance().apply { timeInMillis = date }
@@ -865,19 +1194,58 @@ class HomeActivity : AppCompatActivity() {
                 dateButton.text = "Date: ${dateFormat.format(date)}"
             }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
         }
-        val note = input("Note (optional)", record?.getString("note").orEmpty(), 1)
+        val note = input("Note (optional)", record?.getString("note") ?: importedMessage?.note.orEmpty(), 1)
         lateinit var save: Button
-        save = button("SAVE TRANSACTION") {
+        save = button(if (importedMessage != null) "ADD TO ACTIVITY" else "SAVE TRANSACTION") {
             val cents = parseCents(amount.text.toString())
             if (cents == null || cents <= 0L) {
                 amount.error = "Enter a positive amount with at most 2 decimal places"
                 return@button
             }
-            val data = mapOf("amountCents" to cents, "category" to category.selectedItem.toString(),
-                "date" to date, "note" to note.text.toString().trim())
-            saveRecord(transactionStore, record?.id, data, save, "Transactions")
+            val data = mutableMapOf<String, Any>(
+                "amountCents" to cents,
+                "category" to category.selectedItem.toString(),
+                "subcategory" to subcategory.selectedItem.toString(),
+                "date" to date,
+                "note" to note.text.toString().trim()
+            )
+            val recordedAt = record?.getLong("recordedAt")
+                ?: if (record == null) {
+                    importedMessage?.date ?: maxOf(System.currentTimeMillis(), (balanceSnapshotAt ?: 0L) + 1L)
+                } else {
+                    null
+                }
+            if (recordedAt != null) data["recordedAt"] = recordedAt
+            val sourceId = importedMessage?.sourceId ?: record?.getString("sourceMpesaId")
+            if (sourceId != null) data["sourceMpesaId"] = sourceId
+            if (importedMessage != null) {
+                saveImportedTransaction(sourceId = importedMessage.sourceId, data = data, save = save)
+            } else {
+                saveRecord(transactionStore, record?.id, data, save, "Transactions")
+            }
         }
         button("Cancel") { show("Transactions") }
+    }
+
+    private fun saveImportedTransaction(sourceId: String, data: Map<String, Any>, save: Button) {
+        save.isEnabled = false
+        val reference = transactionStore.document(sourceId)
+        FirebaseFirestore.getInstance().runTransaction { transaction ->
+            if (transaction.get(reference).exists()) {
+                throw IllegalStateException("This M-Pesa payment has already been added to activity.")
+            }
+            transaction.set(reference, data)
+        }.addOnCompleteListener(this) { result ->
+            save.isEnabled = true
+            if (result.isSuccessful) {
+                show("Transactions")
+            } else {
+                AlertDialog.Builder(this)
+                    .setMessage(result.exception?.localizedMessage ?: "Could not import this payment.")
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+        }
     }
 
     private fun goalForm(record: QueryDocumentSnapshot?) {
