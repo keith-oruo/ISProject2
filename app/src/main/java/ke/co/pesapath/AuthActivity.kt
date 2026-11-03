@@ -7,6 +7,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -20,7 +21,13 @@ class AuthActivity : AppCompatActivity() {
     private var pendingRegistrationUser: FirebaseUser? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val darkMode = getSharedPreferences("pesapath_preferences", MODE_PRIVATE)
+            .getBoolean("dark_mode", true)
+        AppCompatDelegate.setDefaultNightMode(
+            if (darkMode) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
+        )
         super.onCreate(savedInstanceState)
+        AppSessionSecurity.requireLoginAfterProcessRestart(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_auth)
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.authRoot)) { view, insets ->

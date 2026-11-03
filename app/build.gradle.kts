@@ -33,6 +33,7 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-functions")
     implementation("com.google.firebase:firebase-ai")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     debugImplementation("com.google.firebase:firebase-appcheck-debug")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")

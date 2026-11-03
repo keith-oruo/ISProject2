@@ -11,6 +11,12 @@ This Android/Kotlin prototype implements the first part of the proposed financia
 
 Only authenticated users can read or change their own `users/{uid}/transactions` and `users/{uid}/goals` documents. Passwords are handled by Firebase Authentication and are not stored in Firestore. Without a valid Firebase configuration the app shows a setup message on the login screen.
 
+## Profile, accessibility, and support
+
+The Profile tab lets users update their Firebase display name and change their password after confirming their current password; passwords are managed by Firebase Authentication and are never stored in Firestore. Users can also choose dark mode or larger text; these presentation preferences are saved locally on the device. Support opens an email draft to `keith.oruo@strathmore.edu`. The feedback form prepares a message to the same address, and the user can review or edit it in their email app before sending. Feedback is not uploaded automatically.
+
+For security, PesaPath signs out when its activity is closed (including removal from Recents) and requires authentication after the app process is restarted. Simply switching to another app does not immediately sign out.
+
 ## Build
 
 Use JDK 17, Android SDK platform 36 and Build Tools 36.0.0. Run `:app:assembleDebug` with Gradle (or use Android Studio's Build APK command). The generated APK is in `app/build/outputs/apk/debug/`.
@@ -41,6 +47,10 @@ The current Functions configuration uses Node.js 22 and defaults to the Daraja s
 
 The payment flow currently supports customer-initiated Paybill STK Push transactions through this app. It tracks only payments initiated through PesaPath; Daraja does not provide access here to a customer's unrelated M-Pesa wallet balance or complete wallet statement. Amounts must be whole Kenyan shillings, from KES 1 through KES 250,000. Do not rely on a pending payment as completed until its Daraja callback has been verified.
 
-The Payments screen also lets you add a completed PesaPath Daraja payment to spending. To import a payment made outside PesaPath, open its confirmation in your Messages app, share that selected message with PesaPath, review the parsed amount and details, then choose its category and subcategory. PesaPath does not request inbox access; only the message you share is processed. Incoming payments, reversals, failed payments, and unrecognized message formats are rejected. Imported records use a stable source ID to prevent duplicate spending entries. The Subscriptions category includes Business, Entertainment, Music and streaming, Software, Education, Health and fitness, and Other.
+The Payments screen also lets you add a completed PesaPath Daraja payment to spending. To import a payment made outside PesaPath, either share the selected message from your Messages app or open the import form and paste the SMS text or choose a screenshot. Screenshot text is recognized on-device; review the extracted text and parsed amount before choosing its category and subcategory. PesaPath does not request inbox access; only a message you explicitly share, paste, or select as an image is processed. Incoming payments, reversals, failed payments, and unrecognized message formats are rejected. Imported records use a stable source ID to prevent duplicate spending entries.
+
+The Activity screen and dashboard also support bank-statement import from CSV, PDF, or image files. CSV statements need recognizable date, description, and debit/credit or amount columns; PDFs and images are read on-device with text recognition. Users review detected rows and select a spending category before import. Credit rows are displayed but excluded from spending. Statement files and OCR text are not uploaded; only the selected transaction records are saved to the user's Firestore account. Imports are limited to 2 MB for CSV files, 20 PDF pages, and 300 detected rows. Bank statement formats vary, so unsupported column layouts or unclear scans may need a CSV export or a clearer image. The Subscriptions category includes Business, Entertainment, Music and streaming, Software, Education, Health and fitness, and Other.
+
+Bank-statement transaction records include a validated `sourceStatementId` for duplicate prevention. If Firestore rules were deployed before this field was added, publish the current `firestore.rules` again (for example, `firebase deploy --only firestore:rules`) before importing statements.
 
 The Home screen includes a current-balance card. Set a starting balance manually or share a M-Pesa balance-inquiry SMS with PesaPath and confirm the parsed amount. New spending added after that balance snapshot is deducted automatically; changing the balance resets the starting snapshot. The balance is a user-maintained estimate, not a live Daraja wallet balance. Only the SMS explicitly shared with PesaPath is processed.

@@ -1,13 +1,24 @@
 package ke.co.pesapath
 
 import android.app.DatePickerDialog
+import android.content.ActivityNotFoundException
+import android.content.ClipboardManager
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
+import android.text.InputFilter
+import android.text.InputType
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
@@ -19,20 +30,32 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
+import androidx.core.content.ContextCompat
+import androidx.core.widget.addTextChangedListener
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import androidx.appcompat.content.res.AppCompatResources
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.EmailAuthProvider
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.google.firebase.firestore.CollectionReference
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.QueryDocumentSnapshot
+import com.google.android.gms.tasks.Tasks
 import java.math.BigDecimal
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
@@ -43,6 +66,15 @@ import java.util.concurrent.Executors
 import kotlinx.coroutines.runBlocking
 
 class HomeActivity : AppCompatActivity() {
+    private companion object {
+        const val PREFERENCES_NAME = "pesapath_preferences"
+        const val KEY_DARK_MODE = "dark_mode"
+        const val KEY_LARGE_TEXT = "large_text"
+        const val KEY_PAGE = "current_page"
+        const val SUPPORT_EMAIL = "keith.oruo@strathmore.edu"
+        const val LARGE_TEXT_SCALE = 1.2f
+    }
+
     private val categories = listOf("Food", "Transport", "Rent", "Shopping", "Bills", "Subscriptions", "Other")
     private val subcategories = mapOf(
         "Food" to listOf("Groceries", "Dining", "Coffee", "Takeaway", "Other"),
@@ -90,6 +122,17 @@ class HomeActivity : AppCompatActivity() {
     private var balanceSnapshotCents: Long? = null
     private var balanceSnapshotAt: Long? = null
     private var balanceLoadError: String? = null
+    private var largeTextEnabled = false
+    private var feedbackRating: String? = null
+    private var feedbackReason: String? = null
+    private var feedbackComment = ""
+    private lateinit var screenshotPicker: ActivityResultLauncher<Array<String>>
+    private lateinit var statementPicker: ActivityResultLauncher<Array<String>>
+    private val statementExecutor = Executors.newSingleThreadExecutor()
+    private var mpesaMessageInput: EditText? = null
+    private var mpesaImportStatus: TextView? = null
+    private var mpesaImportDialog: AlertDialog? = null
+    private var statementProgressDialog: AlertDialog? = null
 
     // M-Pesa
     private lateinit var mpesaService: MpesaService
@@ -100,18 +143,34 @@ class HomeActivity : AppCompatActivity() {
     private var mpesaLoadError: String? = null
 
     // Colors
-    private val C_PINE = 0xFF18B8AC.toInt()
-    private val C_PINE_DARK = 0xFF183D82.toInt()
-    private val C_INK = 0xFFF5F7FA.toInt()
-    private val C_INK_SOFT = 0xFFC3CBD5.toInt()
-    private val C_SURFACE = 0xFF24272D.toInt()
-    private val C_BORDER = 0xFF373B43.toInt()
-    private val C_MUTED = 0xFF9AA4B0.toInt()
-    private val C_SOFT_BLUE = 0xFF20363B.toInt()
-    private val C_ERROR_TEXT = 0xFFFF8585.toInt()
+    private val C_PINE get() = ContextCompat.getColor(this, R.color.pine)
+    private val C_PINE_DARK get() = ContextCompat.getColor(this, R.color.pineDark)
+    private val C_INK get() = ContextCompat.getColor(this, R.color.ink)
+    private val C_INK_SOFT get() = ContextCompat.getColor(this, R.color.inkSoft)
+    private val C_SURFACE get() = ContextCompat.getColor(this, R.color.surface)
+    private val C_BORDER get() = ContextCompat.getColor(this, R.color.border)
+    private val C_MUTED get() = ContextCompat.getColor(this, R.color.muted)
+    private val C_SOFT_BLUE get() = ContextCompat.getColor(this, R.color.softBlue)
+    private val C_ERROR_TEXT get() = ContextCompat.getColor(this, R.color.errorText)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val preferences = getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+        AppCompatDelegate.setDefaultNightMode(
+            if (preferences.getBoolean(KEY_DARK_MODE, true)) {
+                AppCompatDelegate.MODE_NIGHT_YES
+            } else {
+                AppCompatDelegate.MODE_NIGHT_NO
+            }
+        )
         super.onCreate(savedInstanceState)
+        AppSessionSecurity.requireLoginAfterProcessRestart(this)
+        screenshotPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) recognizeMpesaScreenshot(uri)
+        }
+        statementPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) importBankStatement(uri)
+        }
+        largeTextEnabled = preferences.getBoolean(KEY_LARGE_TEXT, false)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val user = FirebaseAuth.getInstance().currentUser
         if (user == null) {
@@ -183,11 +242,19 @@ class HomeActivity : AppCompatActivity() {
         }
         loadChatHistory()
         loadMpesaHistory()
-        show("Home")
+        show(savedInstanceState?.getString(KEY_PAGE) ?: "Home")
         handleSharedMpesaMessage(intent)
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(KEY_PAGE, page)
+        super.onSaveInstanceState(outState)
+    }
+
     override fun onDestroy() {
+        if (isFinishing && !isChangingConfigurations) {
+            FirebaseAuth.getInstance().signOut()
+        }
         transactionListener?.remove()
         goalListener?.remove()
         balanceListener?.remove()
@@ -195,6 +262,7 @@ class HomeActivity : AppCompatActivity() {
         mpesaListener?.remove()
         chatExecutor.shutdownNow()
         mpesaExecutor.shutdownNow()
+        statementExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -215,6 +283,7 @@ class HomeActivity : AppCompatActivity() {
                     }
                     if (page == "Chat") {
                         renderChatMessages()
+                        scaleChatMessages()
                         setChatStatus(chatLoadError.orEmpty())
                     }
                     updateChatControls()
@@ -240,6 +309,7 @@ class HomeActivity : AppCompatActivity() {
                 }
                 if (page == "Chat") {
                     renderChatMessages()
+                    scaleChatMessages()
                     setChatStatus(when {
                         chatSending -> "PesaPath is thinking…"
                         else -> chatSetupError.orEmpty()
@@ -278,8 +348,22 @@ class HomeActivity : AppCompatActivity() {
     private fun handleSharedMpesaMessage(sharedIntent: Intent?) {
         if (sharedIntent?.action != Intent.ACTION_SEND || sharedIntent.type != "text/plain") return
         val text = sharedIntent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString().orEmpty()
-        val importedBalance = MpesaSmsParser.parseBalanceCents(text)
+        processMpesaImport(text)
+    }
+
+    private fun processMpesaImport(text: String) {
+        val importDialog = mpesaImportDialog
+        val message = text.trim()
+        if (message.isBlank()) {
+            mpesaImportStatus?.apply {
+                this.text = "Paste a message or choose a screenshot first."
+                visibility = View.VISIBLE
+            }
+            return
+        }
+        val importedBalance = MpesaSmsParser.parseBalanceCents(message)
         if (importedBalance != null) {
+            importDialog?.dismiss()
             AlertDialog.Builder(this)
                 .setTitle("Import M-Pesa balance?")
                 .setMessage("PesaPath read ${money(importedBalance)} from the balance message you shared. Use this as your new starting balance?")
@@ -288,27 +372,412 @@ class HomeActivity : AppCompatActivity() {
                 .show()
             return
         }
-        val imported = MpesaSmsParser.parse(text)
+        val imported = MpesaSmsParser.parse(message)
         if (imported == null) {
-            AlertDialog.Builder(this)
-                .setTitle("Could not read this payment")
-                .setMessage("Share a completed M-Pesa payment message. Incoming payments, reversals, and unsupported messages cannot be added as spending.")
-                .setPositiveButton("OK", null)
-                .show()
+            val explanation =
+                "Could not read a supported M-Pesa message. Check the text or screenshot and try again. " +
+                    "Only completed outgoing payments or a balance inquiry can be imported."
+            if (importDialog != null) {
+                mpesaImportStatus?.apply {
+                    this.text = explanation
+                    visibility = View.VISIBLE
+                }
+            } else {
+                AlertDialog.Builder(this)
+                    .setTitle("Could not read this message")
+                    .setMessage(explanation)
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
             return
         }
+        importDialog?.dismiss()
         transactionForm(importedMessage = imported)
     }
 
     private fun showMpesaImportHelp() {
-        AlertDialog.Builder(this)
-            .setTitle("Import from M-Pesa")
-            .setMessage(
-                "To import your balance, share a M-Pesa balance-inquiry message with PesaPath and confirm the amount. " +
-                    "To add spending, share a completed payment message and review its details. PesaPath only receives the message you select; it does not read your inbox."
+        val messageInput = EditText(this).apply {
+            hint = "Paste the complete M-Pesa SMS here"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 4
+            maxLines = 8
+            gravity = Gravity.TOP or Gravity.START
+            setTextColor(C_INK)
+            setHintTextColor(C_MUTED)
+            setPadding(14.dp, 12.dp, 14.dp, 12.dp)
+            background = GradientDrawable().apply {
+                setColor(C_SURFACE)
+                cornerRadius = 14.dp.toFloat()
+                setStroke(1.dp, C_BORDER)
+            }
+            contentDescription = "M-Pesa message text. Paste a complete payment or balance SMS here."
+        }
+        val status = TextView(this).apply {
+            textSize = 13f
+            setTextColor(C_ERROR_TEXT)
+            visibility = View.GONE
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24.dp, 8.dp, 24.dp, 0)
+            addView(
+                styledButton("Paste copied message", false, onClick = {
+                    val clipboard = getSystemService(ClipboardManager::class.java)
+                    val clip = clipboard?.primaryClip
+                    val copiedText = clip?.takeIf { it.itemCount > 0 }
+                        ?.getItemAt(0)
+                        ?.coerceToText(this@HomeActivity)
+                        ?.toString()
+                        ?.trim()
+                    if (copiedText.isNullOrBlank()) {
+                        status.text = "No copied text found. Copy the SMS first, or type it below."
+                        status.visibility = View.VISIBLE
+                    } else {
+                        messageInput.setText(copiedText.take(4_000))
+                        status.text = "Message pasted. Review it, then choose Read message."
+                        status.setTextColor(C_PINE)
+                        status.visibility = View.VISIBLE
+                    }
+                }),
+                LinearLayout.LayoutParams(-1, 48.dp)
             )
-            .setPositiveButton("Got it", null)
+            addView(
+                styledButton("Choose message screenshot", false, onClick = {
+                    status.setTextColor(C_MUTED)
+                    status.text = "Choose a clear screenshot showing the full M-Pesa message."
+                    status.visibility = View.VISIBLE
+                    screenshotPicker.launch(arrayOf("image/*"))
+                }),
+                LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 8.dp }
+            )
+            addView(messageInput, LinearLayout.LayoutParams(-1, 144.dp).apply { topMargin = 12.dp })
+            addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 8.dp })
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Import M-Pesa message")
+            .setMessage("Paste the SMS or choose a screenshot. Check the recognized text before importing.")
+            .setView(form)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Read message", null)
+            .create()
+        mpesaMessageInput = messageInput
+        mpesaImportStatus = status
+        mpesaImportDialog = dialog
+        dialog.setOnDismissListener {
+            if (mpesaImportDialog === dialog) {
+                mpesaImportDialog = null
+                mpesaMessageInput = null
+                mpesaImportStatus = null
+            }
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                processMpesaImport(messageInput.text.toString())
+            }
+        }
+        dialog.show()
+    }
+
+    private fun recognizeMpesaScreenshot(uri: Uri) {
+        val messageInput = mpesaMessageInput
+        val status = mpesaImportStatus
+        if (messageInput == null || status == null) return
+        status.setTextColor(C_MUTED)
+        status.text = "Reading screenshot on this device…"
+        status.visibility = View.VISIBLE
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        try {
+            val image = InputImage.fromFilePath(this, uri)
+            recognizer.process(image)
+                .addOnSuccessListener(this) { result ->
+                    val recognizedText = result.text.trim()
+                    if (recognizedText.isBlank()) {
+                        status.setTextColor(C_ERROR_TEXT)
+                        status.text = "No text was found. Try a clearer screenshot or paste the SMS."
+                    } else {
+                        messageInput.setText(recognizedText.take(4_000))
+                        messageInput.setSelection(messageInput.text.length)
+                        status.setTextColor(C_PINE)
+                        status.text = "Text recognized. Review or correct it before reading the message."
+                    }
+                }
+                .addOnFailureListener(this) { error ->
+                    status.setTextColor(C_ERROR_TEXT)
+                    status.text = "Could not read this image: ${error.localizedMessage ?: "Choose another screenshot or paste the SMS."}"
+                }
+                .addOnCompleteListener { recognizer.close() }
+        } catch (error: java.io.IOException) {
+            recognizer.close()
+            status.setTextColor(C_ERROR_TEXT)
+            status.text = "Could not open this image: ${error.localizedMessage ?: "Choose another screenshot or paste the SMS."}"
+        }
+    }
+
+    private fun chooseBankStatement() {
+        statementPicker.launch(arrayOf("text/*", "application/pdf", "image/*"))
+    }
+
+    private fun importBankStatement(uri: Uri) {
+        statementProgressDialog = AlertDialog.Builder(this)
+            .setTitle("Reading bank statement")
+            .setMessage("Statement data is processed on this device. Nothing is uploaded.")
+            .setCancelable(false)
             .show()
+        statementExecutor.execute {
+            try {
+                val fileName = displayName(uri)
+                val mimeType = contentResolver.getType(uri).orEmpty().lowercase(Locale.ROOT)
+                val entries = when {
+                    mimeType == "application/pdf" || fileName.endsWith(".pdf", ignoreCase = true) ->
+                        BankStatementParser.parseRecognizedText(readPdfText(uri))
+                    mimeType.startsWith("image/") ||
+                        fileName.endsWith(".png", true) ||
+                        fileName.endsWith(".jpg", true) ||
+                        fileName.endsWith(".jpeg", true) ||
+                        fileName.endsWith(".webp", true) ->
+                        BankStatementParser.parseRecognizedText(readImageText(uri))
+                    mimeType.startsWith("text/") ||
+                        fileName.endsWith(".csv", ignoreCase = true) ->
+                        BankStatementParser.parseCsv(readStatementCsv(uri))
+                    else -> throw IllegalArgumentException("Choose a CSV, PDF, or image statement.")
+                }
+                runOnUiThread {
+                    statementProgressDialog?.dismiss()
+                    statementProgressDialog = null
+                    if (entries.isEmpty()) {
+                        AlertDialog.Builder(this)
+                            .setTitle("No transactions found")
+                            .setMessage(
+                                "Could not find dated transaction rows with a recognizable debit or credit amount. " +
+                                    "For CSV, include Date, Description, and Debit/Credit columns. You can try another file."
+                            )
+                            .setPositiveButton("OK", null)
+                            .show()
+                    } else {
+                        showStatementReview(fileName, entries)
+                    }
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    statementProgressDialog?.dismiss()
+                    statementProgressDialog = null
+                    AlertDialog.Builder(this)
+                        .setTitle("Could not read statement")
+                        .setMessage(error.localizedMessage ?: "Choose another CSV, PDF, or image file.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        }
+    }
+
+    private fun displayName(uri: Uri): String {
+        var name = "bank statement"
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0) name = cursor.getString(nameIndex) ?: name
+            }
+        }
+        return name
+    }
+
+    private fun readStatementCsv(uri: Uri): String {
+        val input = contentResolver.openInputStream(uri)
+            ?: throw java.io.IOException("Could not open this CSV file.")
+        return input.use {
+            val output = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(8_192)
+            var total = 0
+            while (true) {
+                val count = it.read(buffer)
+                if (count < 0) break
+                total += count
+                if (total > 2_000_000) {
+                    throw IllegalArgumentException("CSV files must be 2 MB or smaller.")
+                }
+                output.write(buffer, 0, count)
+            }
+            output.toByteArray().toString(Charsets.UTF_8)
+        }
+    }
+
+    private fun readImageText(uri: Uri): String {
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        return try {
+            val image = InputImage.fromFilePath(this, uri)
+            Tasks.await(recognizer.process(image)).text
+        } finally {
+            recognizer.close()
+        }
+    }
+
+    private fun readPdfText(uri: Uri): String {
+        val descriptor = contentResolver.openFileDescriptor(uri, "r")
+            ?: throw java.io.IOException("Could not open this PDF file.")
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        try {
+            PdfRenderer(descriptor).use { renderer ->
+                if (renderer.pageCount > 20) {
+                    throw IllegalArgumentException("PDF statements are limited to 20 pages. Export a smaller date range.")
+                }
+                val text = StringBuilder()
+                for (pageIndex in 0 until renderer.pageCount) {
+                    renderer.openPage(pageIndex).use { page ->
+                        val scale = minOf(1600f / page.width, 2200f / page.height, 2f)
+                        val bitmap = Bitmap.createBitmap(
+                            (page.width * scale).toInt().coerceAtLeast(1),
+                            (page.height * scale).toInt().coerceAtLeast(1),
+                            Bitmap.Config.ARGB_8888
+                        )
+                        try {
+                            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            text.appendLine(Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0))).text)
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    }
+                }
+                return text.toString()
+            }
+        } finally {
+            recognizer.close()
+            descriptor.close()
+        }
+    }
+
+    private fun showStatementReview(fileName: String, entries: List<BankStatementEntry>) {
+        page = "Statement review"
+        heading.text = "Review statement"
+        content.removeAllViews()
+        pageBanner(
+            "BANK STATEMENT",
+            "Review transactions",
+            "Check the rows before adding spending to your activity"
+        )
+        val debitCount = entries.count { it.direction == StatementDirection.DEBIT }
+        val creditCount = entries.size - debitCount
+        addText(content, fileName, 13f, true, C_INK, top = 14.dp)
+        addText(
+            content,
+            "$debitCount debits can be imported as spending. $creditCount credits are shown for review but won't be added to spending.",
+            13f,
+            false,
+            C_MUTED,
+            top = 4.dp
+        )
+        val duplicateIds = transactions.mapNotNull { it.getString("sourceStatementId") }.toSet()
+        val selectedIds = mutableSetOf<String>()
+        lateinit var importButton: Button
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        entries.forEach { entry ->
+            val isDebit = entry.direction == StatementDirection.DEBIT
+            val alreadyImported = entry.sourceId in duplicateIds
+            val checkbox = android.widget.CheckBox(this).apply {
+                text = buildString {
+                    append(dateFormat.format(entry.date))
+                    append(" · ")
+                    append(entry.description)
+                    append("\n")
+                    append(if (isDebit) "Debit" else "Credit")
+                    append(" · ")
+                    append(money(entry.amountCents))
+                    if (alreadyImported) append(" · Already imported")
+                }
+                textSize = 14f
+                setTextColor(C_INK)
+                isChecked = isDebit && !alreadyImported
+                isEnabled = isDebit && !alreadyImported
+                contentDescription = "${if (isDebit) "Debit" else "Credit"}, ${dateFormat.format(entry.date)}, ${entry.description}, ${money(entry.amountCents)}"
+                if (isChecked) selectedIds += entry.sourceId
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked) selectedIds += entry.sourceId else selectedIds -= entry.sourceId
+                    importButton.text = "Import ${selectedIds.size} selected debits"
+                    importButton.isEnabled = selectedIds.isNotEmpty()
+                }
+            }
+            val card = panel()
+            card.addView(checkbox)
+            list.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 8.dp })
+        }
+        content.addView(list, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 8.dp })
+
+        addText(content, "Category for imported spending", 14f, true, C_INK, top = 14.dp)
+        val category = Spinner(this).apply {
+            adapter = ArrayAdapter(this@HomeActivity, android.R.layout.simple_spinner_dropdown_item, categories)
+            setSelection(categories.indexOf("Other"))
+        }
+        content.addView(category, LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 8.dp })
+        val subcategory = Spinner(this)
+        fun updateSubcategories(selected: String? = null) {
+            val options = subcategories[category.selectedItem?.toString()] ?: listOf("Other")
+            subcategory.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, options)
+            subcategory.setSelection(options.indexOf(selected ?: "Other").coerceAtLeast(0))
+        }
+        category.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) =
+                updateSubcategories()
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        updateSubcategories()
+        content.addView(subcategory, LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 8.dp })
+        importButton = button("Import ${selectedIds.size} selected debits") {
+            importStatementEntries(
+                entries.filter { it.sourceId in selectedIds },
+                category.selectedItem.toString(),
+                subcategory.selectedItem.toString(),
+                importButton
+            )
+        }
+        importButton.isEnabled = selectedIds.isNotEmpty()
+        button("Cancel") { show("Transactions") }
+        applyTextScale(content, if (largeTextEnabled) LARGE_TEXT_SCALE else 1f)
+    }
+
+    private fun importStatementEntries(
+        entries: List<BankStatementEntry>,
+        category: String,
+        subcategory: String,
+        button: Button
+    ) {
+        if (entries.isEmpty()) return
+        button.isEnabled = false
+        FirebaseFirestore.getInstance().runTransaction { transaction ->
+            val newEntries = entries.filter { entry ->
+                !transaction.get(transactionStore.document(entry.sourceId)).exists()
+            }
+            newEntries.forEach { entry ->
+                val data = mapOf(
+                    "amountCents" to entry.amountCents,
+                    "category" to category,
+                    "subcategory" to subcategory,
+                    "date" to entry.date,
+                    "note" to entry.description,
+                    "recordedAt" to maxOf(System.currentTimeMillis(), (balanceSnapshotAt ?: 0L) + 1L),
+                    "sourceStatementId" to entry.sourceId
+                )
+                transaction.set(transactionStore.document(entry.sourceId), data)
+            }
+            newEntries.size
+        }.addOnCompleteListener(this) { result ->
+            button.isEnabled = true
+            if (result.isSuccessful) {
+                val importedCount = result.result ?: 0
+                show("Transactions")
+                val message = if (importedCount == 0) {
+                    "These statement transactions have already been imported."
+                } else {
+                    "$importedCount statement transactions imported."
+                }
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            } else {
+                AlertDialog.Builder(this)
+                    .setTitle("Could not import statement")
+                    .setMessage(result.exception?.localizedMessage ?: "Please check your connection and try again.")
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+        }
     }
 
     private fun darajaSourceId(transaction: MpesaTransaction): String {
@@ -397,8 +866,13 @@ class HomeActivity : AppCompatActivity() {
             "Payments" -> "Payments"
             "Chat" -> "Chat"
             "Goals" -> "Savings Goals"
+            "Feedback" -> "Feedback"
             else -> "Profile"
         }
+        val textScale = if (largeTextEnabled) LARGE_TEXT_SCALE else 1f
+        heading.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f * textScale)
+        chatInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * textScale)
+        chatSendButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * textScale)
         val tabs = listOf(
             Triple(R.id.homeTab, "Home", R.drawable.ic_home),
             Triple(R.id.transactionsTab, "Transactions", R.drawable.ic_activity),
@@ -411,6 +885,7 @@ class HomeActivity : AppCompatActivity() {
             val selected = destination == tab
             findViewById<Button>(id).apply {
                 setTextColor(if (selected) C_PINE else C_INK_SOFT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f * textScale)
                 val drawable = AppCompatResources.getDrawable(this@HomeActivity, icon)?.mutate()
                 drawable?.let { DrawableCompat.setTint(it, if (selected) C_PINE else C_MUTED) }
                 setCompoundDrawablesWithIntrinsicBounds(null, drawable, null, null)
@@ -431,7 +906,9 @@ class HomeActivity : AppCompatActivity() {
             "Chat" -> assistant()
             "Goals" -> goalList()
             "Profile" -> profile()
+            "Feedback" -> feedback()
         }
+        applyTextScale(content, textScale)
     }
 
     private fun dashboard() {
@@ -527,10 +1004,14 @@ class HomeActivity : AppCompatActivity() {
         secondActionRow.addView(actionTile(R.drawable.ic_sms, "Import M-Pesa", "Share a payment SMS") {
             showMpesaImportHelp()
         }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = 7.dp })
-        secondActionRow.addView(actionTile(R.drawable.ic_goals, "Savings goals", "Track your plans") {
-            show("Goals")
+        secondActionRow.addView(actionTile(R.drawable.ic_import, "Bank statement", "CSV, PDF or image") {
+            chooseBankStatement()
         }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = 7.dp })
         content.addView(secondActionRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
+        val goalsAction = actionTile(R.drawable.ic_goals, "Savings goals", "Track your plans") {
+            show("Goals")
+        }
+        content.addView(goalsAction, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
 
         val breakdownCard = panel()
         addText(breakdownCard, "Spending by category", 17f, true, C_INK)
@@ -551,7 +1032,7 @@ class HomeActivity : AppCompatActivity() {
                 max = 100
                 progress = (amount.toDouble() * 100 / total).toInt().coerceIn(0, 100)
                 progressTintList = android.content.res.ColorStateList.valueOf(C_PINE)
-                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0xFF3B424B.toInt())
+                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(C_BORDER)
             }, LinearLayout.LayoutParams(-1, 8.dp).apply { topMargin = 6.dp })
         }
         content.addView(breakdownCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 18.dp })
@@ -683,6 +1164,7 @@ class HomeActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(0, 48.dp, 1f).apply { marginStart = 5.dp }
         )
         content.addView(importActions, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 10.dp })
+        button("Import bank statement (CSV, PDF, or image)") { chooseBankStatement() }
         val sorted = transactions.sortedByDescending { it.getLong("date") ?: 0L }
         if (sorted.isEmpty()) emptyPanel("No activity yet", "Add your first transaction to start tracking your spending.")
         sorted.forEach { record ->
@@ -756,7 +1238,7 @@ class HomeActivity : AppCompatActivity() {
                 max = 100
                 progress = percent.coerceIn(0, 100)
                 progressTintList = android.content.res.ColorStateList.valueOf(C_PINE)
-                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0xFFE6EDF7.toInt())
+                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(C_BORDER)
             }, LinearLayout.LayoutParams(-1, 8.dp).apply { topMargin = 12.dp })
             addText(goal, "Due ${dateFormat.format(record.getLong("dueDate") ?: 0L)}", 12f, false,
                 C_MUTED, top = 8.dp)
@@ -883,8 +1365,9 @@ class HomeActivity : AppCompatActivity() {
     }
 
     private fun profile() {
-        val email = FirebaseAuth.getInstance().currentUser?.email.orEmpty()
-        pageBanner("YOUR PESAPATH", "Account details", "Manage your signed-in session")
+        val user = FirebaseAuth.getInstance().currentUser
+        val email = user?.email.orEmpty()
+        pageBanner("YOUR PESAPATH", "Profile & preferences", "Manage your account and make PesaPath easier to use")
         val account = panel().apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -902,14 +1385,332 @@ class HomeActivity : AppCompatActivity() {
         }
         account.addView(avatar, LinearLayout.LayoutParams(52.dp, 52.dp).apply { marginEnd = 14.dp })
         val identity = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        addText(identity, "Signed in", 12f, false, C_MUTED)
+        addText(identity, user?.displayName?.takeIf { it.isNotBlank() } ?: "Signed in", 14f, true, C_INK)
         addText(identity, email, 15f, true, C_INK, top = 3.dp)
         account.addView(identity, LinearLayout.LayoutParams(0, -2, 1f))
         content.addView(account, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 14.dp })
+        button("Edit profile name") { editProfileName() }
+        button("Change password") { changePassword() }
+
+        val accessibility = panel()
+        addText(accessibility, "Accessibility & appearance", 16f, true, C_INK, bottom = 8.dp)
+        addSettingToggle(
+            accessibility,
+            "Dark mode",
+            "Use a darker color theme",
+            AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        ) { enabled ->
+            getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_DARK_MODE, enabled)
+                .apply()
+            AppCompatDelegate.setDefaultNightMode(
+                if (enabled) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
+            )
+        }
+        addSettingToggle(
+            accessibility,
+            "Larger text",
+            "Increase text size across the app",
+            largeTextEnabled
+        ) { enabled ->
+            largeTextEnabled = enabled
+            getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_LARGE_TEXT, enabled)
+                .apply()
+            show("Profile")
+        }
+        content.addView(accessibility, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp })
+
+        val support = panel()
+        addText(support, "Support", 16f, true, C_INK)
+        addText(support, SUPPORT_EMAIL, 14f, false, C_MUTED, top = 3.dp)
+        support.addView(
+            styledButton("Email support", false, onClick = { openSupportEmail("PesaPath support", "") }),
+            LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 10.dp }
+        )
+        content.addView(support, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp })
+
+        val feedback = panel()
+        addText(feedback, "Help improve PesaPath", 16f, true, C_INK)
+        addText(feedback, "Share feedback about your experience.", 13f, false, C_MUTED, top = 3.dp)
+        feedback.addView(
+            styledButton("Share feedback", false, onClick = {
+                feedbackRating = null
+                feedbackReason = null
+                feedbackComment = ""
+                show("Feedback")
+            }),
+            LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 10.dp }
+        )
+        content.addView(feedback, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp })
+
         button("Sign out") {
             FirebaseAuth.getInstance().signOut()
             startActivity(Intent(this, AuthActivity::class.java))
             finish()
+        }
+    }
+
+    private fun addSettingToggle(
+        parent: LinearLayout,
+        title: String,
+        detail: String,
+        checked: Boolean,
+        onChanged: (Boolean) -> Unit
+    ) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 8.dp, 0, 8.dp)
+        }
+        val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        addText(labels, title, 14f, true, C_INK)
+        addText(labels, detail, 12f, false, C_MUTED, top = 2.dp)
+        row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+        val toggle = SwitchCompat(this).apply {
+            isChecked = checked
+            contentDescription = title
+            setOnCheckedChangeListener { _, enabled -> onChanged(enabled) }
+        }
+        row.addView(toggle)
+        parent.addView(row, LinearLayout.LayoutParams(-1, -2))
+    }
+
+    private fun editProfileName() {
+        val user = FirebaseAuth.getInstance().currentUser
+        if (user == null) {
+            AlertDialog.Builder(this).setMessage("Your session has ended. Please sign in again.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        val nameInput = EditText(this).apply {
+            hint = "Your name"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            setSingleLine(true)
+            setText(user.displayName.orEmpty())
+            setSelection(text.length)
+        }
+        val container = LinearLayout(this).apply {
+            setPadding(24.dp, 8.dp, 24.dp, 0)
+            addView(nameInput, LinearLayout.LayoutParams(-1, 56.dp))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Edit profile name")
+            .setView(container)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val name = nameInput.text.toString().trim()
+                if (name.isBlank()) {
+                    nameInput.error = "Enter your name"
+                    return@setOnClickListener
+                }
+                user.updateProfile(
+                    com.google.firebase.auth.UserProfileChangeRequest.Builder().setDisplayName(name).build()
+                ).addOnCompleteListener(this) { result ->
+                    if (result.isSuccessful) {
+                        dialog.dismiss()
+                        show("Profile")
+                    } else {
+                        AlertDialog.Builder(this)
+                            .setTitle("Could not update profile")
+                            .setMessage(result.exception?.localizedMessage ?: "Please try again.")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun changePassword() {
+        val user = FirebaseAuth.getInstance().currentUser
+        val email = user?.email
+        if (user == null || email.isNullOrBlank()) {
+            AlertDialog.Builder(this)
+                .setMessage("Your session has ended. Please sign in again before changing your password.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        if (user.providerData.none { it.providerId == EmailAuthProvider.PROVIDER_ID }) {
+            AlertDialog.Builder(this)
+                .setTitle("Password not available")
+                .setMessage("This account does not use email and password sign-in.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+
+        val currentPassword = EditText(this).apply {
+            hint = "Current password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+        }
+        val newPassword = EditText(this).apply {
+            hint = "New password (at least 8 characters)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+        }
+        val confirmPassword = EditText(this).apply {
+            hint = "Confirm new password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+        }
+        val error = TextView(this).apply {
+            setTextColor(C_ERROR_TEXT)
+            visibility = View.GONE
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24.dp, 8.dp, 24.dp, 0)
+            addView(currentPassword, LinearLayout.LayoutParams(-1, 56.dp))
+            addView(newPassword, LinearLayout.LayoutParams(-1, 56.dp))
+            addView(confirmPassword, LinearLayout.LayoutParams(-1, 56.dp))
+            addView(error, LinearLayout.LayoutParams(-1, -2))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Change password")
+            .setView(form)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Update", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val oldValue = currentPassword.text.toString()
+                val newValue = newPassword.text.toString()
+                if (oldValue.isBlank()) {
+                    currentPassword.error = "Enter your current password"
+                    return@setOnClickListener
+                }
+                if (newValue.length < 8) {
+                    newPassword.error = "Use at least 8 characters"
+                    return@setOnClickListener
+                }
+                if (newValue != confirmPassword.text.toString()) {
+                    confirmPassword.error = "Passwords do not match"
+                    return@setOnClickListener
+                }
+
+                val updateButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                updateButton.isEnabled = false
+                error.visibility = View.GONE
+                user.reauthenticate(EmailAuthProvider.getCredential(email, oldValue))
+                    .continueWithTask { reauthTask ->
+                        if (!reauthTask.isSuccessful) {
+                            throw reauthTask.exception ?: IllegalStateException("Could not verify your current password.")
+                        }
+                        user.updatePassword(newValue)
+                    }
+                    .addOnCompleteListener(this) { result ->
+                        updateButton.isEnabled = true
+                        if (result.isSuccessful) {
+                            dialog.dismiss()
+                            Toast.makeText(this, "Password updated.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            error.text = result.exception?.localizedMessage
+                                ?: "Could not update your password. Check your current password and try again."
+                            error.visibility = View.VISIBLE
+                        }
+                    }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun feedback() {
+        pageBanner("YOUR FEEDBACK", "Help us improve", "Tell us how PesaPath is working for you")
+        addText(content, "Would you recommend PesaPath?", 17f, true, C_INK, top = 16.dp)
+        val ratings = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("Unlikely", "Maybe", "Absolutely").forEach { rating ->
+            ratings.addView(
+                styledButton(rating, feedbackRating == rating, onClick = {
+                    feedbackRating = rating
+                    show("Feedback")
+                }),
+                LinearLayout.LayoutParams(0, 52.dp, 1f).apply {
+                    if (rating != "Unlikely") marginStart = 6.dp
+                    if (rating != "Absolutely") marginEnd = 6.dp
+                }
+            )
+        }
+        content.addView(ratings, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 8.dp })
+        addText(content, "What is the main reason?", 15f, true, C_INK, top = 18.dp)
+        listOf("Ease of use", "Reliability", "Security", "Financial insights").forEach { reason ->
+            content.addView(
+                styledButton(reason, feedbackReason == reason, onClick = {
+                    feedbackReason = reason
+                    show("Feedback")
+                }),
+                LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 8.dp }
+            )
+        }
+        addText(content, "Anything else? (optional, up to 140 characters)", 13f, false, C_MUTED, top = 14.dp)
+        val comment = input(
+            "Tell us about your experience",
+            "",
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        ).apply {
+            filters = arrayOf(InputFilter.LengthFilter(140))
+            addTextChangedListener { feedbackComment = it?.toString().orEmpty() }
+            setText(feedbackComment)
+            minHeight = 96.dp
+            gravity = Gravity.TOP or Gravity.START
+            setPadding(14.dp, 12.dp, 14.dp, 12.dp)
+        }
+        button("Send feedback") {
+            val rating = feedbackRating
+            val reason = feedbackReason
+            if (rating == null || reason == null) {
+                AlertDialog.Builder(this)
+                    .setMessage("Please select a recommendation and a reason before continuing.")
+                    .setPositiveButton("OK", null)
+                    .show()
+                return@button
+            }
+            val body = buildString {
+                appendLine("PesaPath feedback")
+                appendLine("Recommendation: $rating")
+                appendLine("Reason: $reason")
+                append("Comments: ${comment.text.toString().trim()}")
+            }
+            openSupportEmail("PesaPath feedback", body)
+        }
+        button("Cancel") { show("Profile") }
+    }
+
+    private fun openSupportEmail(subject: String, body: String) {
+        val emailUri = Uri.parse(
+            "mailto:$SUPPORT_EMAIL?subject=${Uri.encode(subject)}&body=${Uri.encode(body)}"
+        )
+        try {
+            startActivity(Intent(Intent.ACTION_SENDTO, emailUri))
+        } catch (_: ActivityNotFoundException) {
+            AlertDialog.Builder(this)
+                .setTitle("No email app found")
+                .setMessage("Email $SUPPORT_EMAIL to contact PesaPath support.")
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
+    private fun applyTextScale(view: View, scale: Float) {
+        if (view is TextView) {
+            view.setTextSize(TypedValue.COMPLEX_UNIT_PX, view.textSize * scale)
+        }
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                applyTextScale(view.getChildAt(index), scale)
+            }
+        }
+    }
+
+    private fun scaleChatMessages() {
+        chatMessagesContainer?.let {
+            applyTextScale(it, if (largeTextEnabled) LARGE_TEXT_SCALE else 1f)
         }
     }
 

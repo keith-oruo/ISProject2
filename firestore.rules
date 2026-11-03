@@ -8,7 +8,10 @@ service cloud.firestore {
     function validTransaction() {
       let data = request.resource.data;
       return data.keys().hasAll(['amountCents', 'category', 'date', 'note'])
-        && data.keys().hasOnly(['amountCents', 'category', 'subcategory', 'date', 'note', 'sourceMpesaId', 'recordedAt'])
+        && data.keys().hasOnly([
+          'amountCents', 'category', 'subcategory', 'date', 'note',
+          'sourceMpesaId', 'sourceStatementId', 'recordedAt'
+        ])
         && data.amountCents is int && data.amountCents > 0
         && data.category in ['Food', 'Transport', 'Rent', 'Shopping', 'Bills', 'Subscriptions', 'Other']
         && data.date is int && data.date > 0
@@ -17,6 +20,9 @@ service cloud.firestore {
         && (!data.keys().hasAny(['sourceMpesaId'])
           || (data.sourceMpesaId is string
             && data.sourceMpesaId.matches('^mpesa_[a-f0-9]{64}$')))
+        && (!data.keys().hasAny(['sourceStatementId'])
+          || (data.sourceStatementId is string
+            && data.sourceStatementId.matches('^statement_[a-f0-9]{64}$')))
         && (!data.keys().hasAny(['recordedAt'])
           || (data.recordedAt is int && data.recordedAt > 0));
     }
