@@ -336,12 +336,21 @@ class AuthActivity : AppCompatActivity() {
                 }
             }
         }
-        val options = PhoneAuthOptions.newBuilder(auth)
-            .setMultiFactorHint(hint)
-            .setActivity(this)
-            .setCallbacks(callbacks)
-            .setTimeout(60L, TimeUnit.SECONDS)
-            .build()
+        val options = try {
+            PhoneAuthOptions.newBuilder(auth)
+                .setMultiFactorHint(hint)
+                .setMultiFactorSession(resolver.session)
+                .setActivity(this)
+                .setCallbacks(callbacks)
+                .setTimeout(60L, TimeUnit.SECONDS)
+                .build()
+        } catch (error: IllegalArgumentException) {
+            onError(
+                "Firebase could not start SMS verification for this account. " +
+                    (error.localizedMessage ?: "Remove and re-enroll the SMS factor.")
+            )
+            return
+        }
         PhoneAuthProvider.verifyPhoneNumber(options)
     }
 
