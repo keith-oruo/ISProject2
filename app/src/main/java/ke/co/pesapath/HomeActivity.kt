@@ -1913,7 +1913,7 @@ class HomeActivity : AppCompatActivity() {
                         completed = true
                         setSwitchState(toggle, false)
                         showAccountSecurityError(
-                            exception.localizedMessage ?: "Could not send an SMS verification code."
+                            PhoneVerificationErrors.message(exception)
                         )
                     }
 
@@ -1942,7 +1942,7 @@ class HomeActivity : AppCompatActivity() {
             }
             .addOnFailureListener(this) { error ->
                 setSwitchState(toggle, false)
-                showAccountSecurityError(error.localizedMessage ?: "Could not start phone verification.")
+                showAccountSecurityError(PhoneVerificationErrors.message(error))
             }
     }
 

@@ -316,7 +316,7 @@ class AuthActivity : AppCompatActivity() {
             override fun onVerificationFailed(exception: com.google.firebase.FirebaseException) {
                 if (!completed) {
                     completed = true
-                    onError(exception.localizedMessage ?: "Could not send an SMS verification code.")
+                    onError(PhoneVerificationErrors.message(exception))
                 }
             }
 
