@@ -1,8 +1,11 @@
+import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { getApp, initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { logger } from "firebase-functions";
 import { defineSecret, defineString } from "firebase-functions/params";
 import { HttpsError, onCall, onRequest } from "firebase-functions/v2/https";
+import nodemailer from "nodemailer";
 
 initializeApp();
 
@@ -11,12 +14,260 @@ const darajaConsumerKey = defineSecret("DARAJA_CONSUMER_KEY");
 const darajaConsumerSecret = defineSecret("DARAJA_CONSUMER_SECRET");
 const darajaShortCode = defineSecret("DARAJA_SHORT_CODE");
 const darajaPassKey = defineSecret("DARAJA_PASS_KEY");
+const emailMfaSecret = defineSecret("EMAIL_MFA_SECRET");
+const smtpHost = defineSecret("SMTP_HOST");
+const smtpPort = defineSecret("SMTP_PORT");
+const smtpUser = defineSecret("SMTP_USER");
+const smtpPassword = defineSecret("SMTP_PASSWORD");
+const smtpFrom = defineSecret("SMTP_FROM");
 const darajaBaseUrl = defineString("DARAJA_BASE_URL", {
   default: "https://sandbox.safaricom.co.ke",
 });
 const firestore = getFirestore();
+const emailMfaSecrets = [
+  emailMfaSecret,
+  smtpHost,
+  smtpPort,
+  smtpUser,
+  smtpPassword,
+  smtpFrom,
+];
 
 type JsonObject = Record<string, unknown>;
+
+type AuthContext = {
+  uid: string;
+  token: Record<string, unknown>;
+};
+
+function isEmailMfaEnabled(token: Record<string, unknown>): boolean {
+  return token.emailMfaEnabled === true;
+}
+
+function requireEmailMfaComplete(auth: AuthContext): void {
+  if (!isEmailMfaEnabled(auth.token)) return;
+  const verifiedAt = auth.token.emailMfaVerifiedAt;
+  const authTime = auth.token.auth_time;
+  if (
+    typeof verifiedAt !== "number" ||
+    typeof authTime !== "number" ||
+    verifiedAt < authTime
+  ) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Complete email verification before using this service.",
+    );
+  }
+}
+
+function requireRecentAuthentication(auth: AuthContext): void {
+  const authTime = auth.token.auth_time;
+  if (
+    typeof authTime !== "number" ||
+    Date.now() - authTime * 1000 > 5 * 60 * 1000
+  ) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Sign in again before changing email two-factor authentication.",
+    );
+  }
+}
+
+function challengeHash(uid: string, code: string): Buffer {
+  return createHmac("sha256", emailMfaSecret.value())
+    .update(`${uid}:${code}`)
+    .digest();
+}
+
+async function sendEmailMfaChallenge(uid: string, email: string): Promise<void> {
+  const code = randomInt(100_000, 1_000_000).toString();
+  const reference = firestore.collection("emailMfaChallenges").doc(uid);
+  const now = Date.now();
+  const canSend = await firestore.runTransaction(async (transaction) => {
+    const saved = await transaction.get(reference);
+    if (saved.exists && now - (saved.get("sentAt") as number) < 30_000) {
+      return false;
+    }
+    transaction.set(reference, {
+      codeHash: challengeHash(uid, code).toString("hex"),
+      email,
+      sentAt: now,
+      expiresAt: now + 10 * 60 * 1000,
+      attempts: 0,
+    });
+    return true;
+  });
+  if (!canSend) {
+    throw new HttpsError(
+      "resource-exhausted",
+      "Wait 30 seconds before requesting another verification email.",
+    );
+  }
+
+  const port = Number(smtpPort.value());
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new HttpsError("failed-precondition", "Email delivery is not configured correctly.");
+  }
+  const transporter = nodemailer.createTransport({
+    host: smtpHost.value(),
+    port,
+    secure: port === 465,
+    auth: { user: smtpUser.value(), pass: smtpPassword.value() },
+  });
+  try {
+    await transporter.sendMail({
+      from: smtpFrom.value(),
+      to: email,
+      subject: "Your PesaPath verification code",
+      text: `Your PesaPath verification code is ${code}. It expires in 10 minutes. If you did not request this code, you can ignore this email.`,
+    });
+  } catch (error) {
+    await reference.delete();
+    logger.error("Could not send an email MFA challenge.", error);
+    throw new HttpsError("unavailable", "Could not send a verification email. Try again later.");
+  }
+}
+
+async function startEmailMfaChallenge(
+  auth: AuthContext,
+  purpose: "enroll" | "sign-in",
+): Promise<{ emailHint: string }> {
+  const user = await getAuth().getUser(auth.uid);
+  const factor = firestore.collection("emailMfaFactors").doc(auth.uid);
+  const enrolledFactor = purpose === "sign-in" ? await factor.get() : null;
+  const email = purpose === "sign-in"
+    ? enrolledFactor?.get("email")
+    : user.emailVerified ? user.email : null;
+  if (typeof email !== "string" || !email) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Verify your account email before enabling email two-factor authentication.",
+    );
+  }
+  if (purpose === "enroll") {
+    requireRecentAuthentication(auth);
+  } else if (!isEmailMfaEnabled(auth.token)) {
+    throw new HttpsError("failed-precondition", "Email two-factor authentication is not enabled.");
+  }
+  await sendEmailMfaChallenge(auth.uid, email);
+  const [name, domain] = email.split("@");
+  return { emailHint: `${name.slice(0, 1)}•••@${domain}` };
+}
+
+async function verifyEmailMfaChallenge(
+  auth: AuthContext,
+  code: string,
+  purpose: "enroll" | "sign-in",
+): Promise<void> {
+  const reference = firestore.collection("emailMfaChallenges").doc(auth.uid);
+  const now = Date.now();
+  const verifiedEmail = await firestore.runTransaction(async (transaction) => {
+    const challenge = await transaction.get(reference);
+    if (!challenge.exists) return null;
+    const data = challenge.data();
+    const attempts = typeof data?.attempts === "number" ? data.attempts : 0;
+    const savedHash = typeof data?.codeHash === "string" ? data.codeHash : "";
+    const email = typeof data?.email === "string" ? data.email : null;
+    const expired = typeof data?.expiresAt !== "number" || data.expiresAt <= now;
+    if (expired || attempts >= 5) {
+      transaction.delete(reference);
+      return null;
+    }
+    const actualHash = challengeHash(auth.uid, code);
+    const expectedHash = Buffer.from(savedHash, "hex");
+    const matches =
+      expectedHash.length === actualHash.length &&
+      timingSafeEqual(actualHash, expectedHash);
+    if (!matches) {
+      transaction.update(reference, { attempts: attempts + 1 });
+      return null;
+    }
+    transaction.delete(reference);
+    return email;
+  });
+  if (!verifiedEmail) {
+    throw new HttpsError(
+      "permission-denied",
+      "The verification code is invalid or expired. Request a new code and try again.",
+    );
+  }
+
+  if (purpose === "sign-in" && !isEmailMfaEnabled(auth.token)) {
+    throw new HttpsError("failed-precondition", "Email two-factor authentication is not enabled.");
+  }
+  const user = await getAuth().getUser(auth.uid);
+  const claims = { ...(user.customClaims ?? {}) };
+  if (purpose === "enroll") {
+    if (!user.email || !user.emailVerified || user.email !== verifiedEmail) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Your verified account email changed. Request a new code and try again.",
+      );
+    }
+    claims.emailMfaEnabled = true;
+    await firestore.collection("emailMfaFactors").doc(auth.uid).set({
+      email: verifiedEmail,
+      enrolledAt: FieldValue.serverTimestamp(),
+    });
+  }
+  claims.emailMfaVerifiedAt = Math.floor(Date.now() / 1000);
+  await getAuth().setCustomUserClaims(auth.uid, claims);
+}
+
+export const beginEmailMfaEnrollment = onCall(
+  { region: REGION, maxInstances: 10, secrets: emailMfaSecrets },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Sign in before enabling email two-factor authentication.");
+    }
+    requireEmailMfaComplete(request.auth);
+    return startEmailMfaChallenge(request.auth, "enroll");
+  },
+);
+
+export const beginEmailMfaSignIn = onCall(
+  { region: REGION, maxInstances: 10, secrets: emailMfaSecrets },
+  async (request) => {
+    if (!request.auth) throw new HttpsError("unauthenticated", "Sign in to continue.");
+    return startEmailMfaChallenge(request.auth, "sign-in");
+  },
+);
+
+export const verifyEmailMfa = onCall(
+  { region: REGION, maxInstances: 10, secrets: emailMfaSecrets },
+  async (request) => {
+    if (!request.auth) throw new HttpsError("unauthenticated", "Sign in to continue.");
+    const data = objectValue(request.data);
+    const code = typeof data?.code === "string" ? data.code.trim() : "";
+    const purpose = data?.purpose;
+    if (!/^\d{6}$/.test(code) || (purpose !== "enroll" && purpose !== "sign-in")) {
+      throw new HttpsError("invalid-argument", "Enter the 6-digit email verification code.");
+    }
+    if (purpose === "enroll") {
+      requireEmailMfaComplete(request.auth);
+      requireRecentAuthentication(request.auth);
+    }
+    await verifyEmailMfaChallenge(request.auth, code, purpose);
+    return { verified: true };
+  },
+);
+
+export const disableEmailMfa = onCall(
+  { region: REGION, maxInstances: 10 },
+  async (request) => {
+    if (!request.auth) throw new HttpsError("unauthenticated", "Sign in to continue.");
+    requireEmailMfaComplete(request.auth);
+    requireRecentAuthentication(request.auth);
+    const user = await getAuth().getUser(request.auth.uid);
+    const claims = { ...(user.customClaims ?? {}) };
+    delete claims.emailMfaEnabled;
+    delete claims.emailMfaVerifiedAt;
+    await getAuth().setCustomUserClaims(request.auth.uid, claims);
+    await firestore.collection("emailMfaFactors").doc(request.auth.uid).delete();
+    await firestore.collection("emailMfaChallenges").doc(request.auth.uid).delete();
+    return { disabled: true };
+  },
+);
 
 function objectValue(value: unknown): JsonObject | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -131,6 +382,7 @@ export const createMpesaPayment = onCall(
   },
   async (request) => {
     if (!request.auth) throw new HttpsError("unauthenticated", "Sign in before starting a payment.");
+    requireEmailMfaComplete(request.auth);
 
     const data = objectValue(request.data);
     const phone = typeof data?.phone === "string" ? normalizePhone(data.phone) : null;

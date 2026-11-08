@@ -2,7 +2,15 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function isOwner(userId) {
-      return request.auth != null && request.auth.uid == userId;
+      return request.auth != null
+        && request.auth.uid == userId
+        && hasCompletedEmailMfa();
+    }
+
+    function hasCompletedEmailMfa() {
+      let token = request.auth.token;
+      return token.get('emailMfaEnabled', false) != true
+        || token.get('emailMfaVerifiedAt', 0) >= token.get('auth_time', 0);
     }
 
     function validTransaction() {
@@ -33,6 +41,14 @@ service cloud.firestore {
         && data.keys().hasOnly(['balanceCents', 'updatedAt'])
         && data.balanceCents is int && data.balanceCents >= 0
         && data.updatedAt is int && data.updatedAt > 0;
+    }
+
+    function validGoalReminders() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['enabled', 'frequency'])
+        && data.keys().hasOnly(['enabled', 'frequency'])
+        && data.enabled is bool
+        && data.frequency in ['daily', 'monthly'];
     }
 
     function validSubcategory(category, subcategory) {
@@ -85,8 +101,10 @@ service cloud.firestore {
     match /users/{userId}/settings/{settingId} {
       allow read: if isOwner(userId);
       allow create, update: if isOwner(userId)
-        && settingId == 'currentBalance'
-        && validBalance();
+        && (
+          (settingId == 'currentBalance' && validBalance())
+          || (settingId == 'goalReminders' && validGoalReminders())
+        );
       allow delete: if false;
     }
 

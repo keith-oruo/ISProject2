@@ -9,7 +9,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-data class ExchangeRateContext(val prompt: String, val sourceNote: String)
+data class ExchangeRateContext(val prompt: String)
 
 class ExchangeRateSource(context: Context) {
     private val cache = context.applicationContext.getSharedPreferences("exchange_rates", Context.MODE_PRIVATE)
@@ -38,17 +38,15 @@ class ExchangeRateSource(context: Context) {
             val published = dateFormat.format(Date(publishedAt))
             val retrieved = dateFormat.format(Date(if (useCache) savedAt else now))
             ExchangeRateContext(
-                "Daily indicative exchange rates (not live bank quotes): $verifiedRates. " +
+                "Source: Exchange Rate API (https://www.exchangerate-api.com). " +
+                    "Daily indicative exchange rates (not live bank quotes): $verifiedRates. " +
                     "Published: $published. Retrieved: $retrieved. " +
-                    "Bank fees and spreads are excluded. No inflation, investment prices, or historical rates are supplied.",
-                "Rates By Exchange Rate API\nhttps://www.exchangerate-api.com\n" +
-                    "Published: $published\nRetrieved: $retrieved\nDaily indicative rates; bank fees and spreads excluded."
+                    "Bank fees and spreads are excluded. No inflation, investment prices, or historical rates are supplied."
             )
         } catch (_: Exception) {
             ExchangeRateContext(
                 "Exchange-rate data unavailable or outdated. Do not quote current exchange rates or invent market data. " +
-                    "Explain the limitation if asked about currency conversion. Budgeting chat can continue.",
-                "Exchange-rate data unavailable. No current market rates were supplied for this answer."
+                    "Explain the limitation if asked about currency conversion. Budgeting chat can continue."
             )
         }
     }

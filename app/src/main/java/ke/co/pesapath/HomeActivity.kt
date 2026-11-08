@@ -4,6 +4,7 @@ import android.app.DatePickerDialog
 import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
 import android.content.Intent
+import android.Manifest
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
@@ -11,6 +12,8 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.text.InputFilter
@@ -23,6 +26,7 @@ import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.widget.Button
+import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -46,6 +50,12 @@ import androidx.core.graphics.drawable.DrawableCompat
 import androidx.appcompat.content.res.AppCompatResources
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.EmailAuthProvider
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.PhoneAuthCredential
+import com.google.firebase.auth.PhoneAuthOptions
+import com.google.firebase.auth.PhoneAuthProvider
+import com.google.firebase.auth.PhoneMultiFactorGenerator
+import com.google.firebase.auth.PhoneMultiFactorInfo
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -55,7 +65,9 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.QueryDocumentSnapshot
+import com.google.firebase.functions.FirebaseFunctions
 import com.google.android.gms.tasks.Tasks
+import com.google.firebase.firestore.WriteBatch
 import java.math.BigDecimal
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
@@ -63,6 +75,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 
 class HomeActivity : AppCompatActivity() {
@@ -73,6 +86,7 @@ class HomeActivity : AppCompatActivity() {
         const val KEY_PAGE = "current_page"
         const val SUPPORT_EMAIL = "keith.oruo@strathmore.edu"
         const val LARGE_TEXT_SCALE = 1.2f
+        const val REQUEST_GOAL_REMINDER_PERMISSION = 7201
     }
 
     private val categories = listOf("Food", "Transport", "Rent", "Shopping", "Bills", "Subscriptions", "Other")
@@ -111,11 +125,13 @@ class HomeActivity : AppCompatActivity() {
     private var chatListener: ListenerRegistration? = null
     private var chatMessagesContainer: LinearLayout? = null
     private var chatStatusView: TextView? = null
+    private var chatClearButton: Button? = null
     private var chatService: FinancialChatService? = null
     private var chatHistoryLoaded = false
     private var chatLoadError: String? = null
     private var chatSetupError: String? = null
     private var chatSending = false
+    private var chatClearing = false
     private val chatExecutor = Executors.newSingleThreadExecutor()
     private var page = "Home"
     private var errorMessage: String? = null
@@ -133,6 +149,7 @@ class HomeActivity : AppCompatActivity() {
     private var mpesaImportStatus: TextView? = null
     private var mpesaImportDialog: AlertDialog? = null
     private var statementProgressDialog: AlertDialog? = null
+    private var pendingReminderPermissionResult: ((Boolean) -> Unit)? = null
 
     // M-Pesa
     private lateinit var mpesaService: MpesaService
@@ -237,6 +254,11 @@ class HomeActivity : AppCompatActivity() {
             else if (snapshot != null) {
                 goals.clear()
                 goals.addAll(snapshot.documents.filterIsInstance<QueryDocumentSnapshot>())
+                GoalReminderCache.saveGoalCount(
+                    this,
+                    user.uid,
+                    goals.count { (it.getLong("savedCents") ?: 0L) < (it.getLong("targetCents") ?: 0L) }
+                )
             }
             if (page == "Goals") show(page)
         }
@@ -249,6 +271,20 @@ class HomeActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(KEY_PAGE, page)
         super.onSaveInstanceState(outState)
+    }
+
+    @Deprecated("Deprecated in Android")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_GOAL_REMINDER_PERMISSION) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            pendingReminderPermissionResult?.invoke(granted)
+            pendingReminderPermissionResult = null
+        }
     }
 
     override fun onDestroy() {
@@ -1392,6 +1428,19 @@ class HomeActivity : AppCompatActivity() {
         button("Edit profile name") { editProfileName() }
         button("Change password") { changePassword() }
 
+        if (user != null) {
+            val security = panel()
+            addText(security, "Account security", 16f, true, C_INK, bottom = 8.dp)
+            addAccountEmailVerification(security, user)
+            addMfaSetting(security, user)
+            addEmailMfaSetting(security, user)
+            content.addView(security, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp })
+            content.addView(
+                goalReminderSettings(user.uid),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp }
+            )
+        }
+
         val accessibility = panel()
         addText(accessibility, "Accessibility & appearance", 16f, true, C_INK, bottom = 8.dp)
         addSettingToggle(
@@ -1457,7 +1506,7 @@ class HomeActivity : AppCompatActivity() {
         detail: String,
         checked: Boolean,
         onChanged: (Boolean) -> Unit
-    ) {
+    ): SwitchCompat {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1470,10 +1519,655 @@ class HomeActivity : AppCompatActivity() {
         val toggle = SwitchCompat(this).apply {
             isChecked = checked
             contentDescription = title
-            setOnCheckedChangeListener { _, enabled -> onChanged(enabled) }
+            val listener = CompoundButton.OnCheckedChangeListener { _, enabled -> onChanged(enabled) }
+            tag = listener
+            setOnCheckedChangeListener(listener)
         }
         row.addView(toggle)
         parent.addView(row, LinearLayout.LayoutParams(-1, -2))
+        return toggle
+    }
+
+    private fun addMfaSetting(parent: LinearLayout, user: FirebaseUser) {
+        val enrolledPhone = user.multiFactor.enrolledFactors
+            .filterIsInstance<PhoneMultiFactorInfo>()
+            .firstOrNull()
+        lateinit var toggle: SwitchCompat
+        toggle = addSettingToggle(
+            parent,
+            "SMS two-factor authentication",
+            if (enrolledPhone == null) "Require a text message code after your password"
+            else "A verification code is required when you sign in",
+            enrolledPhone != null
+        ) { enabled ->
+            toggle.isEnabled = false
+            requireRecentAuthentication(user, onSuccess = {
+                if (enabled) {
+                    ensureEmailVerifiedForMfa(user, toggle) {
+                        promptForMfaPhone(user, toggle)
+                    }
+                } else {
+                    unenrollMfaPhone(user, enrolledPhone, toggle)
+                }
+            },             onFailure = { message ->
+                setSwitchState(toggle, enrolledPhone != null)
+                showAccountSecurityError(message)
+            })
+        }
+    }
+
+    private fun addAccountEmailVerification(parent: LinearLayout, user: FirebaseUser) {
+        val status = addText(
+            parent,
+            if (user.isEmailVerified) "Account email verified" else "Verify your account email before enabling a second factor.",
+            13f,
+            false,
+            if (user.isEmailVerified) C_PINE else C_MUTED,
+            top = 4.dp
+        )
+        lateinit var action: Button
+        action = styledButton(
+            if (user.isEmailVerified) "Refresh email verification status" else "Send verification email",
+            false,
+            onClick = {
+                if (user.isEmailVerified) {
+                    refreshEmailVerificationStatus(user, status, action)
+                } else {
+                    sendAccountEmailVerification(user, status)
+                }
+            }
+        )
+        parent.addView(action, LinearLayout.LayoutParams(-1, 44.dp).apply { bottomMargin = 4.dp })
+        if (!user.isEmailVerified) {
+            user.reload().addOnSuccessListener(this) {
+                if (!isFinishing && parent.parent != null) {
+                    status.text = if (user.isEmailVerified) {
+                        "Account email verified"
+                    } else {
+                        "Verify your account email before enabling a second factor."
+                    }
+                    action.text = if (user.isEmailVerified) {
+                        "Refresh email verification status"
+                    } else {
+                        "Send verification email"
+                    }
+                    status.setTextColor(if (user.isEmailVerified) C_PINE else C_MUTED)
+                }
+            }
+        }
+    }
+
+    private fun sendAccountEmailVerification(user: FirebaseUser, status: TextView) {
+        user.sendEmailVerification()
+            .addOnSuccessListener(this) {
+                status.text = "Verification link sent to ${user.email.orEmpty()}. Verify it, then sign out and sign in again before enrolling a second factor."
+                AlertDialog.Builder(this)
+                    .setTitle("Verify your email first")
+                    .setMessage(status.text)
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+            .addOnFailureListener(this) { error ->
+                showAccountSecurityError(
+                    error.localizedMessage ?: "Could not send an email verification link."
+                )
+            }
+    }
+
+    private fun refreshEmailVerificationStatus(user: FirebaseUser, status: TextView, action: Button) {
+        user.reload()
+            .addOnSuccessListener(this) {
+                if (user.isEmailVerified) {
+                    status.text = "Account email verified. Sign out and sign in again before enrolling a second factor."
+                    status.setTextColor(C_PINE)
+                    action.text = "Email verified"
+                } else {
+                    status.text = "Email is not verified yet. Open the link in your inbox, then check again."
+                    status.setTextColor(C_MUTED)
+                }
+            }
+            .addOnFailureListener(this) { error ->
+                showAccountSecurityError(
+                    error.localizedMessage ?: "Could not refresh email verification status."
+                )
+            }
+    }
+
+    private fun ensureEmailVerifiedForMfa(
+        user: FirebaseUser,
+        toggle: SwitchCompat,
+        onVerified: () -> Unit
+    ) {
+        user.reload()
+            .addOnSuccessListener(this) {
+                if (user.isEmailVerified) {
+                    onVerified()
+                } else {
+                    setSwitchState(toggle, false)
+                    user.sendEmailVerification()
+                        .addOnSuccessListener(this) {
+                            AlertDialog.Builder(this)
+                                .setTitle("Verify your email first")
+                                .setMessage(
+                                    "Firebase requires a verified email before SMS authentication can be enrolled. " +
+                                        "A verification link was sent to ${user.email.orEmpty()}. Open it, then sign out and sign in again before enabling SMS authentication."
+                                )
+                                .setPositiveButton("OK", null)
+                                .show()
+                        }
+                        .addOnFailureListener(this) { error ->
+                            showAccountSecurityError(
+                                error.localizedMessage ?: "Could not send an email verification link."
+                            )
+                        }
+                }
+            }
+            .addOnFailureListener(this) { error ->
+                setSwitchState(toggle, false)
+                showAccountSecurityError(
+                    error.localizedMessage ?: "Could not check whether your account email is verified."
+                )
+            }
+    }
+
+    private fun addEmailMfaSetting(parent: LinearLayout, user: FirebaseUser) {
+        val loading = addText(parent, "Loading email verification settings…", 13f, false, C_MUTED, top = 8.dp)
+        user.getIdToken(false)
+            .addOnSuccessListener(this) { token ->
+                if (isFinishing || page != "Profile" || parent.parent == null) return@addOnSuccessListener
+                parent.removeView(loading)
+                val enabled = token.claims["emailMfaEnabled"] == true
+                lateinit var toggle: SwitchCompat
+                toggle = addSettingToggle(
+                    parent,
+                    "Email verification codes",
+                    if (enabled) "Require an emailed code at sign-in"
+                    else "Add an emailed code after your password",
+                    enabled
+                ) { checked ->
+                    toggle.isEnabled = false
+                    requireRecentAuthentication(
+                        user,
+                        onSuccess = {
+                            if (checked) beginEmailMfaEnrollment(user, toggle)
+                            else disableEmailMfa(user, toggle)
+                        },
+                        onFailure = { message ->
+                            setSwitchState(toggle, enabled)
+                            showAccountSecurityError(message)
+                        }
+                    )
+                }
+            }
+            .addOnFailureListener(this) { error ->
+                if (isFinishing || page != "Profile" || parent.parent == null) return@addOnFailureListener
+                parent.removeView(loading)
+                addText(
+                    parent,
+                    "Could not load email verification settings: ${error.localizedMessage ?: "Try again."}",
+                    13f,
+                    false,
+                    C_ERROR_TEXT,
+                    top = 8.dp
+                )
+            }
+    }
+
+    private fun beginEmailMfaEnrollment(user: FirebaseUser, toggle: SwitchCompat) {
+        if (!user.isEmailVerified) {
+            user.sendEmailVerification()
+                .addOnCompleteListener(this) { result ->
+                    setSwitchState(toggle, false)
+                    showAccountSecurityError(
+                        if (result.isSuccessful) {
+                            "Verify your email using the link we sent, then sign out and back in before enabling email verification."
+                        } else {
+                            result.exception?.localizedMessage ?: "Could not send an email verification link."
+                        }
+                    )
+                }
+            return
+        }
+        FirebaseFunctions.getInstance("us-central1")
+            .getHttpsCallable("beginEmailMfaEnrollment")
+            .call()
+            .addOnSuccessListener(this) {
+                showEmailEnrollmentCodePrompt(user, toggle)
+            }
+            .addOnFailureListener(this) { error ->
+                setSwitchState(toggle, false)
+                showAccountSecurityError(
+                    error.localizedMessage ?: "Could not send an email verification code."
+                )
+            }
+    }
+
+    private fun showEmailEnrollmentCodePrompt(user: FirebaseUser, toggle: SwitchCompat) {
+        val code = EditText(this).apply {
+            hint = "6-digit email code"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Verify your email")
+            .setMessage("Enter the code sent to your verified email address. It expires in 10 minutes.")
+            .setView(code)
+            .setNegativeButton("Cancel") { _, _ -> setSwitchState(toggle, false) }
+            .setPositiveButton("Verify", null)
+            .create()
+        dialog.setOnCancelListener { setSwitchState(toggle, false) }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = code.text.toString().trim()
+                if (value.length != 6 || value.any { !it.isDigit() }) {
+                    code.error = "Enter the 6-digit code"
+                    return@setOnClickListener
+                }
+                val verify = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                verify.isEnabled = false
+                FirebaseFunctions.getInstance("us-central1")
+                    .getHttpsCallable("verifyEmailMfa")
+                    .call(mapOf("code" to value, "purpose" to "enroll"))
+                    .addOnSuccessListener(this) {
+                        user.getIdToken(true)
+                            .addOnSuccessListener(this) { token ->
+                                if (token.claims["emailMfaEnabled"] == true &&
+                                    token.claims["emailMfaVerifiedAt"] is Number
+                                ) {
+                                    dialog.dismiss()
+                                    show("Profile")
+                                    Toast.makeText(
+                                        this,
+                                        "Email verification is enabled.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } else {
+                                    verify.isEnabled = true
+                                    code.error = "Enrollment was not completed. Try again."
+                                }
+                            }
+                            .addOnFailureListener(this) { error ->
+                                verify.isEnabled = true
+                                code.error = error.localizedMessage ?: "Could not refresh account security."
+                            }
+                    }
+                    .addOnFailureListener(this) { error ->
+                        verify.isEnabled = true
+                        code.error = error.localizedMessage ?: "The code could not be verified."
+                    }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun disableEmailMfa(user: FirebaseUser, toggle: SwitchCompat) {
+        FirebaseFunctions.getInstance("us-central1")
+            .getHttpsCallable("disableEmailMfa")
+            .call()
+            .addOnSuccessListener(this) {
+                user.getIdToken(true)
+                    .addOnSuccessListener(this) { token ->
+                        if (token.claims["emailMfaEnabled"] == true) {
+                            setSwitchState(toggle, true)
+                            showAccountSecurityError("Email verification is still enabled. Try again.")
+                        } else {
+                            show("Profile")
+                            Toast.makeText(
+                                this,
+                                "Email verification is disabled.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                    .addOnFailureListener(this) { error ->
+                        setSwitchState(toggle, true)
+                        showAccountSecurityError(
+                            error.localizedMessage ?: "Could not refresh account security."
+                        )
+                    }
+            }
+            .addOnFailureListener(this) { error ->
+                setSwitchState(toggle, true)
+                showAccountSecurityError(
+                    error.localizedMessage ?: "Could not disable email verification."
+                )
+            }
+    }
+
+    private fun requireRecentAuthentication(
+        user: FirebaseUser,
+        onSuccess: () -> Unit,
+        onFailure: (String) -> Unit
+    ) {
+        user.getIdToken(false)
+            .addOnSuccessListener(this) { token ->
+                val authTime = (token.claims["auth_time"] as? Number)?.toLong()
+                val now = System.currentTimeMillis() / 1000
+                if (authTime != null && now >= authTime && now - authTime <= 5 * 60) {
+                    onSuccess()
+                } else {
+                    onFailure("For your security, sign out and sign in again before changing two-factor authentication.")
+                }
+            }
+            .addOnFailureListener(this) { error ->
+                onFailure(error.localizedMessage ?: "Could not verify your recent sign-in.")
+            }
+    }
+
+    private fun promptForMfaPhone(user: FirebaseUser, toggle: SwitchCompat) {
+        val phone = EditText(this).apply {
+            hint = "+2547XXXXXXXX"
+            inputType = InputType.TYPE_CLASS_PHONE
+            setSingleLine(true)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Add a phone number")
+            .setMessage("Enter a number in international format (for example, +2547XXXXXXXX). Firebase will send it an SMS code.")
+            .setView(phone)
+            .setNegativeButton("Cancel") { _, _ -> setSwitchState(toggle, false) }
+            .setPositiveButton("Send code", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val number = phone.text.toString().trim()
+                if (!number.matches(Regex("^\\+[1-9]\\d{7,14}$"))) {
+                    phone.error = "Use an international number such as +2547XXXXXXXX"
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
+                beginMfaPhoneVerification(user, number, toggle)
+            }
+        }
+        dialog.setOnCancelListener { setSwitchState(toggle, false) }
+        dialog.show()
+    }
+
+    private fun beginMfaPhoneVerification(user: FirebaseUser, number: String, toggle: SwitchCompat) {
+        user.multiFactor.session
+            .addOnSuccessListener(this) { session ->
+                var completed = false
+                fun finishEnrollment(credential: PhoneAuthCredential) {
+                    if (completed) return
+                    completed = true
+                    val assertion = PhoneMultiFactorGenerator.getAssertion(credential)
+                    user.multiFactor.enroll(assertion, "SMS phone")
+                        .addOnCompleteListener(this) { result ->
+                            if (result.isSuccessful) {
+                                show("Profile")
+                                Toast.makeText(this, "Two-factor authentication enabled.", Toast.LENGTH_LONG).show()
+                            } else {
+                                setSwitchState(toggle, false)
+                                showAccountSecurityError(
+                                    result.exception?.localizedMessage ?: "Could not enable two-factor authentication."
+                                )
+                            }
+                        }
+                }
+                val callbacks = object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
+                    override fun onVerificationCompleted(credential: PhoneAuthCredential) {
+                        finishEnrollment(credential)
+                    }
+
+                    override fun onVerificationFailed(exception: com.google.firebase.FirebaseException) {
+                        if (completed) return
+                        completed = true
+                        setSwitchState(toggle, false)
+                        showAccountSecurityError(
+                            exception.localizedMessage ?: "Could not send an SMS verification code."
+                        )
+                    }
+
+                    override fun onCodeSent(
+                        verificationId: String,
+                        token: PhoneAuthProvider.ForceResendingToken
+                    ) {
+                        if (!completed) {
+                            showMfaEnrollmentCodePrompt(
+                                verificationId,
+                                ::finishEnrollment,
+                                toggle,
+                                onCancelled = { completed = true }
+                            )
+                        }
+                    }
+                }
+                val options = PhoneAuthOptions.newBuilder(FirebaseAuth.getInstance())
+                    .setPhoneNumber(number)
+                    .setTimeout(60L, TimeUnit.SECONDS)
+                    .setActivity(this)
+                    .setCallbacks(callbacks)
+                    .setMultiFactorSession(session)
+                    .build()
+                PhoneAuthProvider.verifyPhoneNumber(options)
+            }
+            .addOnFailureListener(this) { error ->
+                setSwitchState(toggle, false)
+                showAccountSecurityError(error.localizedMessage ?: "Could not start phone verification.")
+            }
+    }
+
+    private fun showMfaEnrollmentCodePrompt(
+        verificationId: String,
+        onCredential: (PhoneAuthCredential) -> Unit,
+        toggle: SwitchCompat,
+        onCancelled: () -> Unit
+    ) {
+        val code = EditText(this).apply {
+            hint = "6-digit SMS code"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Verify your phone")
+            .setMessage("Enter the code sent to your phone to turn on two-factor authentication.")
+            .setView(code)
+            .setNegativeButton("Cancel") { _, _ ->
+                onCancelled()
+                setSwitchState(toggle, false)
+            }
+            .setPositiveButton("Verify", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = code.text.toString().trim()
+                if (value.length != 6 || value.any { !it.isDigit() }) {
+                    code.error = "Enter the 6-digit code"
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
+                onCredential(PhoneAuthProvider.getCredential(verificationId, value))
+            }
+        }
+        dialog.setOnCancelListener {
+            onCancelled()
+            setSwitchState(toggle, false)
+        }
+        dialog.show()
+    }
+
+    private fun unenrollMfaPhone(
+        user: FirebaseUser,
+        factor: PhoneMultiFactorInfo?,
+        toggle: SwitchCompat
+    ) {
+        if (factor == null) {
+            setSwitchState(toggle, false)
+            return
+        }
+        user.multiFactor.unenroll(factor.uid)
+            .addOnCompleteListener(this) { result ->
+                if (result.isSuccessful) {
+                    show("Profile")
+                    Toast.makeText(this, "Two-factor authentication disabled.", Toast.LENGTH_LONG).show()
+                } else {
+                    setSwitchState(toggle, true)
+                    showAccountSecurityError(
+                        result.exception?.localizedMessage ?: "Could not disable two-factor authentication."
+                    )
+                }
+            }
+    }
+
+    private fun setSwitchState(toggle: SwitchCompat, checked: Boolean) {
+        val listener = toggle.tag as? CompoundButton.OnCheckedChangeListener
+        toggle.setOnCheckedChangeListener(null)
+        toggle.isChecked = checked
+        toggle.setOnCheckedChangeListener(listener)
+        toggle.isEnabled = true
+    }
+
+    private fun showAccountSecurityError(message: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Account security")
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun goalReminderSettings(userId: String): LinearLayout {
+        val card = panel()
+        addText(card, "Savings goal reminders", 16f, true, C_INK, bottom = 4.dp)
+        addText(
+            card,
+            "Choose whether PesaPath reminds you about unfinished goals. Reminders are sent at 9:00 a.m. local time on this device.",
+            12f,
+            false,
+            C_MUTED
+        )
+        val loading = addText(card, "Loading reminder settings…", 13f, false, C_MUTED, top = 10.dp)
+        FirebaseFirestore.getInstance().collection("users").document(userId)
+            .collection("settings").document("goalReminders")
+            .get()
+            .addOnSuccessListener(this) { snapshot ->
+                if (isFinishing || page != "Profile" || content.indexOfChild(card) < 0) return@addOnSuccessListener
+                card.removeView(loading)
+                val enabled = snapshot.getBoolean("enabled") ?: false
+                var savedFrequency = snapshot.getString("frequency")?.takeIf {
+                    it == "daily" || it == "monthly"
+                } ?: "daily"
+                GoalReminderCache.saveSettings(this, userId, enabled, savedFrequency)
+                if (enabled) GoalReminderScheduler.schedule(this, userId, savedFrequency)
+                else GoalReminderScheduler.cancel(this, userId)
+                lateinit var toggle: SwitchCompat
+                toggle = addSettingToggle(
+                    card,
+                    "Goal reminders",
+                    if (enabled) "Reminders are on" else "Reminders are off",
+                    enabled
+                ) { checked ->
+                    if (checked) {
+                        requestReminderPermission { granted ->
+                            if (granted) {
+                                saveGoalReminderSettings(
+                                    userId,
+                                    true,
+                                    savedFrequency,
+                                    toggle,
+                                    previousToggleState = false
+                                )
+                            } else {
+                                setSwitchState(toggle, false)
+                                Toast.makeText(
+                                    this,
+                                    "Allow notifications to receive savings reminders.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    } else {
+                        saveGoalReminderSettings(
+                            userId,
+                            false,
+                            savedFrequency,
+                            toggle,
+                            previousToggleState = true
+                        )
+                    }
+                }
+                val frequencies = listOf("Daily", "Monthly")
+                val frequencyPicker = Spinner(this).apply {
+                    adapter = ArrayAdapter(
+                        this@HomeActivity,
+                        android.R.layout.simple_spinner_item,
+                        frequencies
+                    ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+                    setSelection(if (savedFrequency == "monthly") 1 else 0)
+                }
+                card.addView(frequencyPicker, LinearLayout.LayoutParams(-1, 48.dp).apply { topMargin = 4.dp })
+                styledButton("Save reminder frequency", false, onClick = {
+                    val frequency = if (frequencyPicker.selectedItemPosition == 1) "monthly" else "daily"
+                    saveGoalReminderSettings(
+                        userId,
+                        enabled = toggle.isChecked,
+                        frequency = frequency,
+                        toggle = toggle,
+                        previousToggleState = toggle.isChecked
+                    ) {
+                        savedFrequency = frequency
+                    }
+                }).also {
+                    card.addView(it, LinearLayout.LayoutParams(-1, 46.dp).apply { topMargin = 4.dp })
+                }
+            }
+            .addOnFailureListener(this) { error ->
+                if (isFinishing || page != "Profile" || content.indexOfChild(card) < 0) return@addOnFailureListener
+                card.removeView(loading)
+                addText(
+                    card,
+                    "Could not load reminder settings: ${error.localizedMessage ?: "Check your connection and try again."}",
+                    13f,
+                    false,
+                    C_ERROR_TEXT,
+                    top = 8.dp
+                )
+            }
+        return card
+    }
+
+    private fun requestReminderPermission(onResult: (Boolean) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        ) {
+            onResult(true)
+            return
+        }
+        pendingReminderPermissionResult = onResult
+        requestPermissions(
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            REQUEST_GOAL_REMINDER_PERMISSION
+        )
+    }
+
+    private fun saveGoalReminderSettings(
+        userId: String,
+        enabled: Boolean,
+        frequency: String,
+        toggle: SwitchCompat,
+        previousToggleState: Boolean,
+        onSaved: () -> Unit = {}
+    ) {
+        FirebaseFirestore.getInstance().collection("users").document(userId)
+            .collection("settings").document("goalReminders")
+            .set(mapOf("enabled" to enabled, "frequency" to frequency))
+            .addOnSuccessListener(this) {
+                GoalReminderCache.saveSettings(this, userId, enabled, frequency)
+                if (enabled) GoalReminderScheduler.schedule(this, userId, frequency)
+                else GoalReminderScheduler.cancel(this, userId)
+                onSaved()
+                Toast.makeText(
+                    this,
+                    if (enabled) "Savings reminders are on." else "Savings reminders are off.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .addOnFailureListener(this) { error ->
+                AlertDialog.Builder(this)
+                    .setTitle("Savings reminders")
+                    .setMessage(error.localizedMessage ?: "Could not save your reminder settings.")
+                    .setPositiveButton("OK", null)
+                    .show()
+                setSwitchState(toggle, previousToggleState)
+            }
     }
 
     private fun editProfileName() {
@@ -1719,8 +2413,12 @@ class HomeActivity : AppCompatActivity() {
         val privacyNote = panel()
         addText(privacyNote, "Your AI assistant", 15f, true, C_INK)
         addText(privacyNote,
-            "Monthly spending totals and savings goals are shared with Gemini to answer your questions. Don't enter passwords, PINs, or account numbers.",
+            "Your current balance, monthly spending totals, and savings goals are shared with Gemini to answer your questions. Don't enter passwords, PINs, or account numbers.",
             12f, false, C_MUTED, top = 5.dp)
+        val clearButton = styledButton("Clear chat history", false, onClick = { confirmClearChatHistory() })
+        clearButton.isEnabled = !chatSending && !chatClearing
+        chatClearButton = clearButton
+        privacyNote.addView(clearButton, LinearLayout.LayoutParams(-1, 44.dp).apply { topMargin = 8.dp })
         content.addView(privacyNote, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 12.dp })
 
         chatMessagesContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1815,7 +2513,7 @@ class HomeActivity : AppCompatActivity() {
 
     private fun sendChatMessage() {
         val question = chatInput.text.toString().trim()
-        if (question.isBlank() || chatSending) return
+        if (question.isBlank() || chatSending || chatClearing) return
         val service = chatService
         if (!chatHistoryLoaded || service == null) {
             setChatStatus(chatSetupError ?: chatLoadError ?: "Chat is still connecting. Try again shortly.")
@@ -1913,7 +2611,9 @@ class HomeActivity : AppCompatActivity() {
             val title = goal.getString("title") ?: "Savings goal"
             "$title: ${money(goal.getLong("savedCents") ?: 0L)} saved of ${money(goal.getLong("targetCents") ?: 0L)}"
         }.ifBlank { "No savings goals recorded." }
-        return "Month: ${SimpleDateFormat("MMMM yyyy", Locale.UK).format(now.time)}. " +
+        val balanceSummary = currentBalanceCents()?.let(::money) ?: "not set"
+        return "Current balance: $balanceSummary. " +
+            "Month: ${SimpleDateFormat("MMMM yyyy", Locale.UK).format(now.time)}. " +
             "Spending: ${money(total)} across ${monthly.size} transactions. " +
             "By category: ${categoriesSummary.ifBlank { "no category spending recorded" }}. " +
             "Savings goals: $goalsSummary"
@@ -1928,7 +2628,57 @@ class HomeActivity : AppCompatActivity() {
 
     private fun updateChatControls() {
         if (!::chatSendButton.isInitialized) return
-        chatSendButton.isEnabled = chatHistoryLoaded && chatService != null && !chatSending
+        chatSendButton.isEnabled = chatHistoryLoaded && chatService != null && !chatSending && !chatClearing
+        chatInput.isEnabled = !chatSending && !chatClearing
+        chatClearButton?.isEnabled = !chatSending && !chatClearing && chatHistoryLoaded
+    }
+
+    private fun confirmClearChatHistory() {
+        if (chatSending || chatClearing) return
+        AlertDialog.Builder(this)
+            .setTitle("Clear chat history?")
+            .setMessage("This permanently deletes all saved chat messages for your account.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Clear") { _, _ -> clearChatHistory() }
+            .show()
+    }
+
+    private fun clearChatHistory() {
+        if (chatSending || chatClearing) return
+        chatClearing = true
+        setChatStatus("Clearing chat history…")
+        updateChatControls()
+        chatExecutor.execute {
+            try {
+                val messages = Tasks.await(chatStore.get())
+                messages.documents.chunked(500).forEach { group ->
+                    val batch: WriteBatch = FirebaseFirestore.getInstance().batch()
+                    group.forEach { document -> batch.delete(document.reference) }
+                    Tasks.await(batch.commit())
+                }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    chatDocuments.clear()
+                    chatService = FinancialChatService(this).apply { restore(emptyList()) }
+                    chatClearing = false
+                    renderChatMessages()
+                    setChatStatus("")
+                    updateChatControls()
+                    Toast.makeText(this, "Chat history cleared.", Toast.LENGTH_SHORT).show()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    chatClearing = false
+                    chatService = null
+                    loadChatHistory()
+                    setChatStatus(
+                        "Could not clear chat history: ${error.localizedMessage ?: "Check your connection and try again."}"
+                    )
+                    updateChatControls()
+                }
+            }
+        }
     }
 
     private fun transactionForm(
